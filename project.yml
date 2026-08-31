@@ -5,11 +5,11 @@ options:
     iOS: "18.0"
   createIntermediateGroups: true
 
-# DEVELOPMENT_TEAM лежит в Configs/Local.xcconfig, который не в гите:
-# у каждого своя команда, и регенерация проекта её не затирает.
+# Signing.xcconfig лежит в гите и подтягивает Local.xcconfig, если тот есть.
+# У каждого своя команда разработчика, и регенерация проекта её не затирает.
 configFiles:
-  Debug: Configs/Local.xcconfig
-  Release: Configs/Local.xcconfig
+  Debug: Configs/Signing.xcconfig
+  Release: Configs/Signing.xcconfig
 
 settings:
   base:

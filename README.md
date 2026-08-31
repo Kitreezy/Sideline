@@ -11,6 +11,20 @@ iOS-приложение, которое берёт видео твоих уда
 xcodegen generate && open TennisForm.xcodeproj
 ```
 
+Для запуска на устройстве нужна своя команда разработчика:
+
+```bash
+cp Configs/Local.xcconfig.example Configs/Local.xcconfig
+```
+
+Дальше вписать туда свой `DEVELOPMENT_TEAM` и уникальный `BUNDLE_ID_PREFIX`.
+Файл не в гите. Без него проект тоже собирается — только без подписи
+под устройство.
+
+Настройки подписи правятся в `project.yml` и xcconfig, а не в интерфейсе
+Xcode: `.xcodeproj` генерируется, и правки в нём затрутся при следующем
+`xcodegen generate`.
+
 Тесты:
 
 ```bash
