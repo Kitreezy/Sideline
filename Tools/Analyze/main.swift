@@ -11,10 +11,11 @@ struct Runner {
             exit(1)
         }
         let url = URL(fileURLWithPath: args[1])
-        let hand: Handedness = args.count > 2 && args[2] == "left" ? .left : .right
+                        let hand: Handedness = args.count > 2 && args[2] == "left" ? .left : .right
+        let fullScan = args.contains("--full")
 
         let start = Date()
-        let track = try await PoseExtractor().extract(from: url) { progress in
+        let track = try await extractTrack(url: url, fullScan: fullScan) { progress in
             if Int(progress * 100) % 10 == 0 {
                 FileHandle.standardError.write("\rпрогресс \(Int(progress * 100))%".data(using: .utf8)!)
             }
@@ -22,10 +23,12 @@ struct Runner {
         FileHandle.standardError.write("\n".data(using: .utf8)!)
 
         print("=== ВИДЕО ===")
+        print("режим:       \(fullScan ? "полный проход" : "два прохода")")
         print("кадр:        \(Int(track.displaySize.width))x\(Int(track.displaySize.height))")
         print("длительность: \(String(format: "%.1f", track.duration)) с")
         print("fps:          \(String(format: "%.1f", track.frameRate))")
-        print("кадров:       \(track.frames.count)")
+        print("кадров всего: \(track.totalFrames)")
+        print("разобрано:    \(track.frames.count) (\(track.totalFrames > 0 ? track.frames.count * 100 / track.totalFrames : 100)%)")
         print("разбор занял: \(String(format: "%.0f", Date().timeIntervalSince(start))) с")
 
         let withSkeleton = track.frames.filter { $0.joints.count >= 8 }.count
@@ -113,5 +116,20 @@ struct Runner {
             print("(порог удара сейчас 2.00)")
         }
 
+    }
+
+    static func extractTrack(
+        url: URL,
+        fullScan: Bool,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws -> PoseTrack {
+        if fullScan {
+            return try await PoseExtractor().extract(from: url, onProgress: onProgress)
+        }
+        var extractor = TwoPassExtractor()
+        // --force прогоняет два прохода даже там, где эвристика их отключает:
+        // нужно, чтобы сравнивать режимы на одном и том же файле.
+        extractor.tuning.force = CommandLine.arguments.contains("--force")
+        return try await extractor.extract(from: url, onProgress: onProgress)
     }
 }

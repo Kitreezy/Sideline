@@ -18,6 +18,27 @@ public enum PoseExtractionError: Error, LocalizedError {
 }
 
 /// Результат прогона видео через Vision.
+/// Насколько игрок шевелится в среднем по всему видео.
+///
+/// Порог удара привязан к этой величине, потому что абсолютный порог не
+/// переносится между съёмками. Но при двухпроходном разборе в дорожке
+/// остаются только окна ударов, и медиана по ним — это уже не фон,
+/// а сами удары. Поэтому фон замеряется на первом проходе, по всей записи,
+/// и передаётся дальше отдельно.
+public struct BackgroundMotion: Sendable {
+    public let leftWristSpeedMedian: Double
+    public let rightWristSpeedMedian: Double
+
+    public init(leftWristSpeedMedian: Double, rightWristSpeedMedian: Double) {
+        self.leftWristSpeedMedian = leftWristSpeedMedian
+        self.rightWristSpeedMedian = rightWristSpeedMedian
+    }
+
+    public func median(for handedness: Handedness) -> Double {
+        handedness == .right ? rightWristSpeedMedian : leftWristSpeedMedian
+    }
+}
+
 public struct PoseTrack: Sendable {
     public let frames: [PoseFrame]
     /// Размер кадра после применения ориентации съёмки — в этих координатах лежат точки.
@@ -28,19 +49,35 @@ public struct PoseTrack: Sendable {
     /// Это разные вещи: во втором случае в кадре просто нет человека,
     /// в первом — распознавание вообще не запустилось.
     public let analysisFailures: Int
+    /// Индексы, с которых начинается новый непрерывный кусок. При разборе
+    /// в два прохода между окнами ударов лежат необработанные секунды,
+    /// и сглаживать через этот разрыв нельзя.
+    public let segmentBoundaries: Set<Int>
+    /// Сколько кадров в видео всего. При двухпроходном разборе Vision
+    /// гоняется не по всем, и `frames.count` этого больше не показывает.
+    public let totalFrames: Int
+    /// Замер фона со всей записи. Пусто, когда разбор шёл по всем кадрам:
+    /// тогда фон честно виден и в самой дорожке.
+    public let backgroundMotion: BackgroundMotion?
 
     public init(
         frames: [PoseFrame],
         displaySize: CGSize,
         frameRate: Double,
         duration: TimeInterval,
-        analysisFailures: Int = 0
+        analysisFailures: Int = 0,
+        segmentBoundaries: Set<Int> = [],
+        totalFrames: Int? = nil,
+        backgroundMotion: BackgroundMotion? = nil
     ) {
         self.frames = frames
         self.displaySize = displaySize
         self.frameRate = frameRate
         self.duration = duration
         self.analysisFailures = analysisFailures
+        self.segmentBoundaries = segmentBoundaries
+        self.totalFrames = totalFrames ?? frames.count
+        self.backgroundMotion = backgroundMotion
     }
 }
 

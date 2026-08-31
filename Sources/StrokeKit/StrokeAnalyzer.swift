@@ -140,7 +140,8 @@ public struct StrokeAnalyzer: Sendable {
         let threshold = Self.strokeThreshold(
             signals.wristSpeed,
             floor: tuning.minPeakSpeed,
-            medianFactor: tuning.medianSpeedFactor
+            medianFactor: tuning.medianSpeedFactor,
+            background: track.backgroundMotion?.median(for: handedness)
         )
         let peaks = SignalProcessing.findPeaks(
             signals.wristSpeed,
@@ -191,7 +192,15 @@ public struct StrokeAnalyzer: Sendable {
     /// Абсолютный порог не переносится между видео, поэтому берём максимум из
     /// него и величины, пропорциональной медианной скорости кисти в этом ролике.
     /// Медиана — это «фон» движения игрока между ударами.
-    static func strokeThreshold(_ speed: Signal, floor: Double, medianFactor: Double) -> Double {
+    static func strokeThreshold(
+        _ speed: Signal,
+        floor: Double,
+        medianFactor: Double,
+        background: Double? = nil
+    ) -> Double {
+        if let background, background.isFinite {
+            return Swift.max(floor, background * medianFactor)
+        }
         let finite = speed.values.filter { $0.isFinite }.sorted()
         guard !finite.isEmpty else { return floor }
         let median = finite[finite.count / 2]
@@ -205,7 +214,10 @@ public struct StrokeAnalyzer: Sendable {
         let times = frames.map(\.time)
         let scale = torsoScale(frames: frames, fallbackHeight: track.displaySize.height)
 
+        // Разрывы бывают двух родов: найденные по прыжку скелета и заранее
+        // известные — границы окон при двухпроходном разборе.
         let cuts = detectCuts(frames: frames, scale: scale, threshold: 0.35)
+            .union(track.segmentBoundaries)
 
         func series(_ transform: (PoseFrame) -> Double) -> Signal {
             let raw = Signal(times: times, values: frames.map(transform))

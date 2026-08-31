@@ -26,7 +26,9 @@ final class AnalysisStore {
         // поэтому тяжёлая работа всё равно уходит с главного потока.
         currentJob = Task {
             do {
-                let track = try await PoseExtractor().extract(from: url) { progress in
+                // Двухпроходный разбор: на записи в слоу-мо полный проход
+                // по всем кадрам занимает минуты, а удары занимают доли времени.
+                let track = try await TwoPassExtractor().extract(from: url) { progress in
                     Task { @MainActor in
                         self.state = .working(stage: "Ищу скелет в кадрах", progress: progress)
                     }

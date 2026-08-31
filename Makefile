@@ -21,9 +21,13 @@ bootstrap:
 
 generate: $(PROJECT)
 
-# Проект пересобирается сам, если project.yml новее — иначе легко забыть
-# и потом долго смотреть на «отсутствующий» только что добавленный файл.
-$(PROJECT): project.yml
+# Зависимость от каталогов, а не только от project.yml: время изменения
+# каталога меняется при добавлении и удалении файлов, а project.yml — нет.
+# Без этого новый файл не попадает в проект, тесты в нём молча не выполняются,
+# и это выглядит как «всё зелено».
+SOURCE_DIRS := $(shell find Sources Tests -type d)
+
+$(PROJECT): project.yml $(SOURCE_DIRS)
 	@xcodegen generate
 
 open: generate
