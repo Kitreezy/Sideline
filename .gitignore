@@ -1,0 +1,31 @@
+# Проект генерируется из project.yml через xcodegen — в гите его держать незачем,
+# иначе каждый регенерат даёт огромный бессмысленный диф и конфликты.
+TennisForm.xcodeproj/
+*.xcworkspace/
+
+# Локальные настройки Xcode
+xcuserdata/
+*.xcuserdatad
+*.xcscmblueprint
+*.xccheckout
+
+# Сборка
+DerivedData/
+build/
+.build/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Команда разработчика у каждого своя
+Configs/Local.xcconfig
+
+# Зависимости
+Pods/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
