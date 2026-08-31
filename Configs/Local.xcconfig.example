@@ -1,11 +1,11 @@
-// Скопируй в Configs/Local.xcconfig и подставь свои значения:
+// Скопируй в Configs/Local.xcconfig (или запусти ./Scripts/bootstrap.sh)
+// и впиши свои значения. Файл не в гите.
 //
-//   cp Configs/Local.xcconfig.example Configs/Local.xcconfig
-//
-// Team ID — в Xcode → Settings → Accounts → твой Apple ID → Manage Certificates,
-// либо на developer.apple.com → Membership.
+// DEVELOPMENT_TEAM — Xcode → Settings → Accounts → твой Apple ID →
+// Manage Certificates, либо developer.apple.com → Membership.
+// Пустым его оставить можно: проект соберётся, но на устройство не встанет.
 
-DEVELOPMENT_TEAM = ЗАПОЛНИ_МЕНЯ
+DEVELOPMENT_TEAM =
 
 // Любой уникальный префикс. Bundle id получится <префикс>.tennisform
 BUNDLE_ID_PREFIX = com.example

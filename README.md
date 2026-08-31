@@ -7,29 +7,29 @@ iOS-приложение, которое берёт видео твоих уда
 
 ## Запуск
 
-```bash
-xcodegen generate && open TennisForm.xcodeproj
-```
-
-Для запуска на устройстве нужна своя команда разработчика:
+`.xcodeproj` в гите нет — он генерируется из `project.yml` через xcodegen.
+После клонирования:
 
 ```bash
-cp Configs/Local.xcconfig.example Configs/Local.xcconfig
+make bootstrap
 ```
 
-Дальше вписать туда свой `DEVELOPMENT_TEAM` и уникальный `BUNDLE_ID_PREFIX`.
-Файл не в гите. Без него проект тоже собирается — только без подписи
-под устройство.
-
-Настройки подписи правятся в `project.yml` и xcconfig, а не в интерфейсе
-Xcode: `.xcodeproj` генерируется, и правки в нём затрутся при следующем
-`xcodegen generate`.
-
-Тесты:
+Скрипт проверит, что xcodegen стоит, заведёт `Configs/Local.xcconfig` из
+примера и сгенерирует проект. Дальше впиши в этот конфиг свой
+`DEVELOPMENT_TEAM` — без него приложение соберётся, но на устройство не встанет.
 
 ```bash
-xcodebuild test -project TennisForm.xcodeproj -scheme TennisForm -destination 'id=<udid симулятора>'
+make open     # открыть в Xcode
+make test     # тесты на симуляторе, он выбирается сам
+make build    # сборка под устройство
+make clean    # снести сгенерированный проект
 ```
+
+`make` пересоздаёт проект сам, если `project.yml` изменился — иначе легко
+добавить файл и долго смотреть, почему Xcode его «не видит».
+
+Настройки правятся в `project.yml` и xcconfig, а не в интерфейсе Xcode:
+правки в сгенерированном `.xcodeproj` затрутся при следующей генерации.
 
 ## Живая камера
 
