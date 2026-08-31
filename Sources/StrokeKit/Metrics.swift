@@ -99,8 +99,13 @@ public struct MetricSummary: Sendable, Identifiable {
         return standardDeviation / key.noticeableSpread
     }
 
+    /// Разброс значений. NaN здесь обычное дело: длительность замаха не
+    /// считается, когда замаха не видно. Сравнения с NaN всегда ложны,
+    /// поэтому min() и max() по такому массиву могут вернуть границы
+    /// в обратном порядке — и построение диапазона роняет процесс.
     public var range: ClosedRange<Double>? {
-        guard let lo = values.min(), let hi = values.max() else { return nil }
+        let finite = values.filter { $0.isFinite }
+        guard let lo = finite.min(), let hi = finite.max(), lo <= hi else { return nil }
         return lo...hi
     }
 
