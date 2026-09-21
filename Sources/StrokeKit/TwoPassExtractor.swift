@@ -39,8 +39,9 @@ public struct TwoPassExtractor: Sendable {
 
     public func extract(
         from url: URL,
-        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
+        onProgress: @escaping @Sendable (ExtractionProgress) -> Void = { _ in }
     ) async throws -> PoseTrack {
+        onProgress(ExtractionProgress(stage: .opening, fraction: 0))
         let source = try await VideoSource(url: url)
 
         // Короткое видео дешевле разобрать целиком, чем городить два прохода.
@@ -54,9 +55,12 @@ public struct TwoPassExtractor: Sendable {
             return try await PoseExtractor().extract(from: url, onProgress: onProgress)
         }
 
+        // Первый проход — примерно 1/stride работы, но время на чтение кадров
+        // фиксированное, поэтому ему отводится доля побольше расчётной.
+        let coarseShare = 0.3
         let coarse = try await scan(source: source, shouldAnalyse: { index, _ in
             index % stride == 0
-        }, progress: { onProgress($0 * 0.35) })
+        }, progress: { onProgress(ExtractionProgress(stage: .scanning, fraction: $0 * coarseShare)) })
 
         let windows = StrokeWindowFinder.candidateWindows(
             frames: coarse.frames,
@@ -70,7 +74,7 @@ public struct TwoPassExtractor: Sendable {
         // Ничего похожего на удар — отдаём то, что уже посчитали, вместе
         // с его статистикой: приложению есть что показать и объяснить.
         guard !windows.isEmpty else {
-            onProgress(1)
+            onProgress(ExtractionProgress(stage: .scanning, fraction: 1))
             return coarse.track(
                 source: source,
                 totalFrames: coarse.totalFrames,
@@ -79,11 +83,22 @@ public struct TwoPassExtractor: Sendable {
             )
         }
 
+        let duration = source.duration
         let fine = try await scan(source: try await VideoSource(url: url), shouldAnalyse: { _, time in
             windows.contains { $0.contains(time) }
-        }, progress: { onProgress(0.35 + $0 * 0.65) })
+        }, progress: { share in
+            // Номер окна, в котором сейчас идём: доля времени переводится
+            // обратно во время, и считаем, сколько окон уже позади.
+            let time = share * duration
+            let done = windows.filter { $0.upperBound <= time }.count
+            let current = min(windows.count, done + 1)
+            onProgress(ExtractionProgress(
+                stage: .analysing(window: current, of: windows.count),
+                fraction: coarseShare + share * (1 - coarseShare)
+            ))
+        })
 
-        onProgress(1)
+        onProgress(ExtractionProgress(stage: .analysing(window: windows.count, of: windows.count), fraction: 1))
         return fine.track(
             source: source,
             totalFrames: fine.totalFrames,

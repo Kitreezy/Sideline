@@ -85,11 +85,11 @@ public struct PoseExtractor: Sendable {
     public init() {}
 
     /// Гоняет каждый кадр через body-pose. Всё локально, ничего не уходит с устройства.
-    /// `onProgress` вызывается с долей 0...1.
     public func extract(
         from url: URL,
-        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
+        onProgress: @escaping @Sendable (ExtractionProgress) -> Void = { _ in }
     ) async throws -> PoseTrack {
+        onProgress(ExtractionProgress(stage: .opening, fraction: 0))
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw PoseExtractionError.noVideoTrack
@@ -149,7 +149,7 @@ public struct PoseExtractor: Sendable {
                 let progress = min(1, time / duration)
                 if progress - lastProgressReport > 0.01 {
                     lastProgressReport = progress
-                    onProgress(progress)
+                    onProgress(ExtractionProgress(stage: .analysingEverything, fraction: progress))
                 }
             }
         }
@@ -157,7 +157,7 @@ public struct PoseExtractor: Sendable {
         if reader.status == .failed {
             throw PoseExtractionError.readerFailed(reader.error?.localizedDescription ?? "чтение прервалось")
         }
-        onProgress(1)
+        onProgress(ExtractionProgress(stage: .analysingEverything, fraction: 1))
 
         let measuredRate = Self.measuredFrameRate(frames: frames) ?? Double(nominalRate)
         return PoseTrack(

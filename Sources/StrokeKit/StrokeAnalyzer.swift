@@ -39,9 +39,51 @@ public struct StrokePhases: Sendable {
     public let hasBackswing: Bool
 }
 
+/// Геометрия движения кисти в окне удара. По этим признакам отличается
+/// удар от всего остального, что тоже разгоняет кисть: сплит-степа,
+/// подбора мяча, перехвата ракетки, дрожания трекинга.
+public struct StrokeShape: Sendable {
+    /// Смещение кисти от конца замаха до контакта, в длинах корпуса.
+    public let forwardDisplacement: Double
+    /// Длина пути кисти за тот же интервал. Больше смещения, если кисть
+    /// петляла: у настоящего разгона путь и смещение почти совпадают.
+    public let forwardPath: Double
+    /// Смещение от контакта до конца окна — проводка.
+    public let followThrough: Double
+    /// Во сколько раз пик выше скорости на границах окна.
+    public let prominence: Double
+    public let hasBackswing: Bool
+
+    /// Насколько прямо шла кисть: 1 — по прямой, 0 — вернулась туда же.
+    public var straightness: Double {
+        forwardPath > 1e-9 ? forwardDisplacement / forwardPath : 0
+    }
+}
+
+/// Почему всплеск скорости кисти может оказаться не ударом.
+public enum StrokeDoubt: String, Sendable, Codable, CaseIterable {
+    /// Кисть почти не сдвинулась: сплит-степ, перехват ракетки, подбор мяча.
+    case tinySwing
+    /// Кисть петляла вместо разгона по дуге — похоже на дрожание трекинга.
+    case wandering
+    /// Пик едва выше фона: рука просто болталась при ходьбе.
+    case noBurst
+
+    public var title: String {
+        switch self {
+        case .tinySwing: return "Кисть почти не сдвинулась"
+        case .wandering: return "Движение петляло"
+        case .noBurst: return "Нет выраженного всплеска"
+        }
+    }
+}
+
 public struct Stroke: Sendable, Identifiable {
     public let id: Int
     public let type: StrokeType
+    public let shape: StrokeShape
+    /// Автоматические сомнения. Пусто — похоже на настоящий удар.
+    public let doubts: [StrokeDoubt]
     public let phases: StrokePhases
     public let startTime: TimeInterval
     public let contactTime: TimeInterval
@@ -49,6 +91,8 @@ public struct Stroke: Sendable, Identifiable {
     public let values: [MetricKey: Double]
 
     public func value(_ key: MetricKey) -> Double { values[key] ?? .nan }
+
+    public var isDoubtful: Bool { !doubts.isEmpty }
 }
 
 public struct AnalysisWarning: Sendable, Identifiable {
@@ -64,14 +108,52 @@ public struct SessionAnalysis: Sendable {
     public let strokes: [Stroke]
     public let warnings: [AnalysisWarning]
 
+    /// Удары, которые в статистику не идут. Начинается с автоматических
+    /// сомнений; пользователь может вернуть удар или, наоборот, выкинуть —
+    /// он видит запись, ему виднее.
+    public var rejectedIDs: Set<Int>
+
+    public init(
+        track: PoseTrack,
+        handedness: Handedness,
+        cameraView: CameraView,
+        signals: AnalyzedSignals,
+        strokes: [Stroke],
+        warnings: [AnalysisWarning]
+    ) {
+        self.track = track
+        self.handedness = handedness
+        self.cameraView = cameraView
+        self.signals = signals
+        self.strokes = strokes
+        self.warnings = warnings
+        self.rejectedIDs = Set(strokes.filter(\.isDoubtful).map(\.id))
+    }
+
+    public var acceptedStrokes: [Stroke] {
+        strokes.filter { !rejectedIDs.contains($0.id) }
+    }
+
+    public var rejectedStrokes: [Stroke] {
+        strokes.filter { rejectedIDs.contains($0.id) }
+    }
+
+    public func isRejected(_ stroke: Stroke) -> Bool {
+        rejectedIDs.contains(stroke.id)
+    }
+
+    public mutating func setRejected(_ rejected: Bool, for stroke: Stroke) {
+        if rejected { rejectedIDs.insert(stroke.id) } else { rejectedIDs.remove(stroke.id) }
+    }
+
     public func strokes(of type: StrokeType) -> [Stroke] {
-        strokes.filter { $0.type == type }
+        acceptedStrokes.filter { $0.type == type }
     }
 
     /// Типы ударов, которые реально нашлись, от самого частого к редкому.
     public var presentTypes: [StrokeType] {
         var counts: [StrokeType: Int] = [:]
-        for stroke in strokes { counts[stroke.type, default: 0] += 1 }
+        for stroke in acceptedStrokes { counts[stroke.type, default: 0] += 1 }
         return counts.sorted { $0.value > $1.value }.map(\.key)
     }
 
@@ -126,6 +208,17 @@ public struct StrokeAnalyzer: Sendable {
         /// где скорость по построению равна доле от пика.
         public var backswingDipShare: Double = 0.7
 
+        // Отсев не-ударов. Пороги выставлены из геометрии: рука за разгон
+        // проходит от корпуса до вытянутого положения — это заведомо больше
+        // половины длины корпуса даже при съёмке сзади. Проверить на живой
+        // записи ещё предстоит; они вынесены сюда именно поэтому.
+        /// Минимальное смещение кисти от конца замаха до контакта, в корпусах.
+        public var minForwardDisplacement: Double = 0.5
+        /// Минимальная прямизна пути: полукруг даёт 0.64, дрожание — около нуля.
+        public var minStraightness: Double = 0.45
+        /// Пик должен быть хотя бы во столько раз выше скорости на краях окна.
+        public var minProminence: Double = 2.0
+
         public init() {}
     }
 
@@ -159,10 +252,13 @@ public struct StrokeAnalyzer: Sendable {
                 signals: signals,
                 handedness: handedness
             )
+            let shape = Self.shape(of: phases, signals: signals)
             strokes.append(
                 Stroke(
                     id: order,
                     type: type,
+                    shape: shape,
+                    doubts: doubts(about: shape),
                     phases: phases,
                     startTime: signals.times[phases.start],
                     contactTime: signals.times[phases.contact],
@@ -183,7 +279,7 @@ public struct StrokeAnalyzer: Sendable {
             warnings: Self.warnings(
                 track: track,
                 signals: signals,
-                strokeCount: strokes.count,
+                strokeCount: strokes.filter { !$0.isDoubtful }.count,
                 cameraView: cameraView
             )
         )
@@ -484,6 +580,66 @@ public struct StrokeAnalyzer: Sendable {
             index -= 1
         }
         return index
+    }
+
+    /// Что в форме движения не похоже на удар. Каждая проверка независима,
+    /// чтобы в интерфейсе было видно, за что именно удар попал под сомнение.
+    func doubts(about shape: StrokeShape) -> [StrokeDoubt] {
+        var result: [StrokeDoubt] = []
+        if shape.forwardDisplacement.isFinite, shape.forwardDisplacement < tuning.minForwardDisplacement {
+            result.append(.tinySwing)
+        }
+        if shape.forwardPath > 1e-9, shape.straightness < tuning.minStraightness {
+            result.append(.wandering)
+        }
+        if shape.prominence.isFinite, shape.prominence < tuning.minProminence {
+            result.append(.noBurst)
+        }
+        return result
+    }
+
+    // MARK: - Форма удара
+
+    static func shape(of phases: StrokePhases, signals: AnalyzedSignals) -> StrokeShape {
+        let scale = signals.torsoScale
+
+        func point(_ index: Int) -> (x: Double, y: Double)? {
+            let x = signals.wristX.values[index], y = signals.wristY.values[index]
+            guard x.isFinite, y.isFinite else { return nil }
+            return (x, y)
+        }
+
+        func displacement(_ from: Int, _ to: Int) -> Double {
+            guard let a = point(from), let b = point(to) else { return .nan }
+            return ((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)).squareRoot() / scale
+        }
+
+        func path(_ from: Int, _ to: Int) -> Double {
+            var total = 0.0
+            var previous = point(from)
+            for index in (from + 1)...max(from + 1, to) {
+                guard let current = point(index) else { continue }
+                if let p = previous {
+                    total += ((current.x - p.x) * (current.x - p.x) + (current.y - p.y) * (current.y - p.y)).squareRoot()
+                }
+                previous = current
+            }
+            return total / scale
+        }
+
+        let speed = signals.wristSpeed.values
+        let peak = speed[phases.contact]
+        let edges = [speed[phases.start], speed[phases.end]].filter { $0.isFinite }
+        let edge = edges.max() ?? 0
+        let prominence = peak.isFinite && edge > 1e-9 ? peak / edge : .nan
+
+        return StrokeShape(
+            forwardDisplacement: displacement(phases.transition, phases.contact),
+            forwardPath: path(phases.transition, phases.contact),
+            followThrough: displacement(phases.contact, phases.end),
+            prominence: prominence,
+            hasBackswing: phases.hasBackswing
+        )
     }
 
     // MARK: - Метрики удара

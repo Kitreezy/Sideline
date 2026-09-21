@@ -18,10 +18,15 @@ struct RootView: View {
         switch store.state {
         case .idle:
             ImportScreen(store: store)
-        case .working(let stage, let progress):
-            WorkingScreen(stage: stage, progress: progress) { store.reset() }
+        case .working(let work):
+            WorkingScreen(work: work) { store.reset() }
         case .ready(let analysis, let url):
-            ResultsScreen(analysis: analysis, videoURL: url) { store.reset() }
+            ResultsScreen(
+                analysis: analysis,
+                videoURL: url,
+                onSetRejected: { stroke, rejected in store.setRejected(rejected, for: stroke) },
+                onReset: { store.reset() }
+            )
         case .failed(let message):
             FailureScreen(message: message) { store.reset() }
         }
@@ -89,18 +94,8 @@ struct ImportScreen: View {
         }
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }
-            Task {
-                do {
-                    guard let movie = try await item.loadTransferable(type: MovieFile.self) else {
-                        loadError = "Не получилось прочитать этот файл."
-                        return
-                    }
-                    loadError = nil
-                    store.analyze(url: movie.url)
-                } catch {
-                    loadError = error.localizedDescription
-                }
-            }
+            loadError = nil
+            store.analyze(item: item)
         }
     }
 }
@@ -128,23 +123,46 @@ private struct ShootingTips: View {
 }
 
 struct WorkingScreen: View {
-    let stage: String
-    let progress: Double
+    let work: AnalysisStore.Work
     let onCancel: () -> Void
 
     var body: some View {
         VStack(spacing: 20) {
-            ProgressView(value: progress)
+            ProgressView(value: work.fraction)
                 .progressViewStyle(.linear)
-            Text(stage).font(.headline)
-            Text("\(Int(progress * 100))%")
-                .font(.system(.title2, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .animation(.easeOut(duration: 0.3), value: work.fraction)
+
+            Text(work.stage.title)
+                .font(.headline)
+                .contentTransition(.numericText())
+
+            HStack(spacing: 12) {
+                Text("\(Int(work.fraction * 100))%")
+                    .font(.system(.title2, design: .rounded))
+                    .monospacedDigit()
+                if let remaining = work.remaining, remaining > 1 {
+                    Text("· осталось \(Self.format(remaining))")
+                        .font(.subheadline)
+                        .monospacedDigit()
+                }
+            }
+            .foregroundStyle(.secondary)
+
+            Text("Экран не погаснет. Не сворачивай надолго: через полминуты в фоне iOS остановит разбор.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+
             Button("Отменить", action: onCancel)
                 .buttonStyle(.bordered)
         }
         .padding(40)
+    }
+
+    private static func format(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        if total < 60 { return "\(total) с" }
+        return "\(total / 60) мин \(total % 60) с"
     }
 }
 

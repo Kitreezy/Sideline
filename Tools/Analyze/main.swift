@@ -16,9 +16,8 @@ struct Runner {
 
         let start = Date()
         let track = try await extractTrack(url: url, fullScan: fullScan) { progress in
-            if Int(progress * 100) % 10 == 0 {
-                FileHandle.standardError.write("\rпрогресс \(Int(progress * 100))%".data(using: .utf8)!)
-            }
+            let line = "\r\(progress.stage.title): \(Int(progress.fraction * 100))%          "
+            FileHandle.standardError.write(line.data(using: .utf8)!)
         }
         FileHandle.standardError.write("\n".data(using: .utf8)!)
 
@@ -85,7 +84,13 @@ struct Runner {
             let overheadText = overhead.map { String(format: "%+.2f", $0) } ?? "  -  "
             let backswing = stroke.value(.backswingDuration)
             let backswingText = backswing.isFinite ? String(format: "%.2f", backswing) : "нет"
-            print("#\(stroke.id + 1)\tконтакт \(String(format: "%6.2f", stroke.contactTime)) с\t\(type)\tплечо \(leadText)\tверх \(overheadText)\tзамах \(backswingText)\tскорость \(speed)\tлокоть \(elbow)°")
+            let shape = stroke.shape
+            let shapeText = String(
+                format: "сдвиг %.2f  путь %.2f  прям %.2f  провод %.2f  выступ %.1f",
+                shape.forwardDisplacement, shape.forwardPath, shape.straightness,
+                shape.followThrough, shape.prominence
+            )
+            print("#\(stroke.id + 1)\t\(String(format: "%6.2f", stroke.contactTime)) с\t\(type)\tскор \(speed)\t\(shapeText)")
         }
 
         print("\n=== РАЗБРОС ПО ТИПАМ УДАРА ===")
@@ -121,7 +126,7 @@ struct Runner {
     static func extractTrack(
         url: URL,
         fullScan: Bool,
-        onProgress: @escaping @Sendable (Double) -> Void
+        onProgress: @escaping @Sendable (ExtractionProgress) -> Void
     ) async throws -> PoseTrack {
         if fullScan {
             return try await PoseExtractor().extract(from: url, onProgress: onProgress)

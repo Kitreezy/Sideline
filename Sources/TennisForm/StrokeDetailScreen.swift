@@ -6,6 +6,7 @@ struct StrokeDetailScreen: View {
     let analysis: SessionAnalysis
     let stroke: Stroke
     let videoURL: URL
+    let onSetRejected: (Stroke, Bool) -> Void
 
     @State private var frameIndex: Int?
 
@@ -22,6 +23,7 @@ struct StrokeDetailScreen: View {
 
                 scrubber
                 phaseBadge
+                verdict
                 metricsGrid
                 charts
             }
@@ -87,6 +89,36 @@ struct StrokeDetailScreen: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    // MARK: - Удар или нет
+
+    private var verdict: some View {
+        let rejected = analysis.isRejected(stroke)
+        return VStack(alignment: .leading, spacing: 8) {
+            if !stroke.doubts.isEmpty {
+                Label {
+                    Text(stroke.doubts.map(\.title).joined(separator: " · "))
+                        .font(.caption)
+                } icon: {
+                    Image(systemName: "questionmark.circle")
+                }
+                .foregroundStyle(.secondary)
+            }
+            Button {
+                onSetRejected(stroke, !rejected)
+            } label: {
+                Label(
+                    rejected ? "Это удар, вернуть в статистику" : "Это не удар",
+                    systemImage: rejected ? "arrow.uturn.backward" : "xmark.circle"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(rejected ? .green : .secondary)
+        }
+        .padding()
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
     }
 
     // MARK: - Цифры удара

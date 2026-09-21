@@ -4,13 +4,17 @@ import SwiftUI
 struct ResultsScreen: View {
     let analysis: SessionAnalysis
     let videoURL: URL
+    let onSetRejected: (Stroke, Bool) -> Void
     let onReset: () -> Void
 
     var body: some View {
         List {
             Section {
                 LabeledContent("Ракурс", value: analysis.cameraView.title)
-                LabeledContent("Найдено", value: Format.strokeCount(analysis.strokes.count))
+                LabeledContent("Ударов", value: Format.strokeCount(analysis.acceptedStrokes.count))
+                if !analysis.rejectedStrokes.isEmpty {
+                    LabeledContent("Отсеяно", value: Format.strokeCount(analysis.rejectedStrokes.count))
+                }
             }
 
             if !analysis.warnings.isEmpty {
@@ -25,7 +29,7 @@ struct ResultsScreen: View {
                 }
             }
 
-            if analysis.strokes.isEmpty {
+            if analysis.acceptedStrokes.isEmpty {
                 Section {
                     ContentUnavailableView(
                         "Ударов не нашлось",
@@ -55,16 +59,40 @@ struct ResultsScreen: View {
                     }
                 }
 
-                Section("Все удары") {
-                    ForEach(analysis.strokes) { stroke in
+                Section("Удары") {
+                    ForEach(analysis.acceptedStrokes) { stroke in
                         NavigationLink {
                             StrokeDetailScreen(
-                                analysis: analysis, stroke: stroke, videoURL: videoURL
+                                analysis: analysis, stroke: stroke, videoURL: videoURL,
+                                onSetRejected: onSetRejected
                             )
                         } label: {
                             StrokeRow(stroke: stroke)
                         }
                     }
+                }
+            }
+
+            if !analysis.rejectedStrokes.isEmpty {
+                Section {
+                    ForEach(analysis.rejectedStrokes) { stroke in
+                        NavigationLink {
+                            StrokeDetailScreen(
+                                analysis: analysis, stroke: stroke, videoURL: videoURL,
+                                onSetRejected: onSetRejected
+                            )
+                        } label: {
+                            RejectedRow(stroke: stroke)
+                        }
+                        .swipeActions(edge: .leading) {
+                            Button("Это удар") { onSetRejected(stroke, false) }
+                                .tint(.green)
+                        }
+                    }
+                } header: {
+                    Text("Похоже, не удары — \(analysis.rejectedStrokes.count)")
+                } footer: {
+                    Text("Всплески скорости кисти без формы удара: сплит-степ, перехват ракетки, подбор мяча. В статистику не идут. Если это всё-таки удар — смахни вправо или открой и верни.")
                 }
             }
         }
@@ -134,6 +162,27 @@ private struct InstabilityRow: View {
             .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
+    }
+}
+
+private struct RejectedRow: View {
+    let stroke: Stroke
+
+    var body: some View {
+        HStack(alignment: .top) {
+            Text("#\(stroke.id + 1)")
+                .font(.headline.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 36, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(Format.time(stroke.contactTime)).font(.subheadline)
+                Text(stroke.doubts.isEmpty
+                     ? "Отмечен как не удар вручную"
+                     : stroke.doubts.map(\.title).joined(separator: " · "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
