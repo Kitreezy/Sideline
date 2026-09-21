@@ -208,7 +208,7 @@ final class StrokeAnalyzerTests: XCTestCase {
         }
         let track = PoseTrack(frames: frames, displaySize: CGSize(width: 1080, height: 1920), frameRate: 120, duration: 4)
         let analysis = StrokeAnalyzer().analyze(track: track, handedness: .right)
-        XCTAssertTrue(analysis.warnings.contains { $0.text.contains("склейки") })
+        XCTAssertTrue(analysis.warnings.contains { $0.text.contains("скелет пропадает") })
     }
 
     func testThresholdRisesWithNoisyFootage() {

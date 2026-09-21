@@ -32,25 +32,39 @@ final class AnalysisStore {
         var remaining: TimeInterval?
     }
 
-    enum State: Equatable {
+    enum State {
         case idle
         case working(Work)
         case ready(SessionAnalysis, videoURL: URL)
         case failed(String)
-
-        static func == (lhs: State, rhs: State) -> Bool {
-            switch (lhs, rhs) {
-            case (.idle, .idle): return true
-            case (.working(let a), .working(let b)): return a == b
-            case (.ready(_, let a), .ready(_, let b)): return a == b
-            case (.failed(let a), .failed(let b)): return a == b
-            default: return false
-            }
-        }
     }
 
     var state: State = .idle
     var handedness: Handedness = .right
+
+    /// Текущий разбор, если он есть. Экраны читают его отсюда, а не держат
+    /// копию: копия не узнаёт, что удар вернули в статистику.
+    var analysis: SessionAnalysis? {
+        if case .ready(let analysis, _) = state { return analysis }
+        return nil
+    }
+
+    var videoURL: URL? {
+        if case .ready(_, let url) = state { return url }
+        return nil
+    }
+
+    var isShowingResults: Bool {
+        get { analysis != nil }
+        set { if !newValue { closeResults() } }
+    }
+
+    /// Назад к списку. Ничего не теряется — тренировка уже сохранена.
+    func closeResults() {
+        currentSession = nil
+        state = .idle
+        reloadSessions()
+    }
 
     /// Сохранённые тренировки и незаконченный разбор — для главного экрана.
     private(set) var savedSessions: [SavedSession] = []
@@ -217,6 +231,19 @@ final class AnalysisStore {
             state = .failed(error.localizedDescription)
         }
     }
+
+    #if DEBUG
+    /// Симулятор без Vision: синтетическая тренировка, чтобы смотреть интерфейс.
+    func createDemoSession() {
+        do {
+            let session = try DemoSession.make(in: sessions)
+            reloadSessions()
+            open(session)
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+    }
+    #endif
 
     func delete(_ session: SavedSession) {
         sessions.delete(session)

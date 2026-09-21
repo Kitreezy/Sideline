@@ -43,6 +43,7 @@ public enum InsightEngine {
         let summaries = analysis.summaries(of: type)
             .filter { $0.key.isReliable(in: analysis.cameraView) }
             .filter { $0.mean.isFinite && $0.standardDeviation.isFinite }
+            .filter { $0.isWellSampled(of: strokes.count) }
 
         for summary in summaries {
             let guidance = summary.key.guidance(for: type)
@@ -64,10 +65,12 @@ public enum InsightEngine {
 
     /// Самая стабильная метрика серии — чтобы было видно, на что опереться.
     public static func strength(for analysis: SessionAnalysis, type: StrokeType) -> Insight? {
-        guard analysis.strokes(of: type).count >= minStrokes else { return nil }
+        let total = analysis.strokes(of: type).count
+        guard total >= minStrokes else { return nil }
         let candidate = analysis.summaries(of: type)
             .filter { $0.key.isReliable(in: analysis.cameraView) }
             .filter { $0.mean.isFinite && $0.standardDeviation.isFinite }
+            .filter { $0.isWellSampled(of: total) }
             .filter { $0.instability < 0.5 }
             .min { $0.instability < $1.instability }
         guard let candidate else { return nil }

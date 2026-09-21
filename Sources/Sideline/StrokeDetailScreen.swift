@@ -3,14 +3,39 @@ import StrokeKit
 import SwiftUI
 
 struct StrokeDetailScreen: View {
-    let analysis: SessionAnalysis
-    let stroke: Stroke
-    let videoURL: URL
-    let onSetRejected: (Stroke, Bool) -> Void
+    let store: AnalysisStore
+    let strokeID: Int
 
     @State private var frameIndex: Int?
 
+    var body: some View {
+        if let analysis = store.analysis,
+           let videoURL = store.videoURL,
+           let stroke = analysis.strokes.first(where: { $0.id == strokeID }) {
+            StrokeDetailContent(
+                analysis: analysis, stroke: stroke, videoURL: videoURL,
+                frameIndex: $frameIndex,
+                onSetRejected: { rejected in store.setRejected(rejected, for: stroke) }
+            )
+        } else {
+            ContentUnavailableView("Удар не найден", systemImage: "questionmark")
+        }
+    }
+}
+
+/// Само содержимое: получает свежий анализ при каждом изменении в хранилище.
+private struct StrokeDetailContent: View {
+    let analysis: SessionAnalysis
+    let stroke: Stroke
+    let videoURL: URL
+    @Binding var frameIndex: Int?
+    let onSetRejected: (Bool) -> Void
+
     private var currentIndex: Int { frameIndex ?? stroke.phases.contact }
+
+    /// Приближение включено по умолчанию, если игрок в кадре мелкий.
+    @State private var zoomChoice: Bool?
+    private var isZoomed: Bool { zoomChoice ?? PlayerRegion.isPlayerSmall(in: analysis) }
 
     var body: some View {
         ScrollView {
@@ -18,8 +43,22 @@ struct StrokeDetailScreen: View {
                 SkeletonVideoView(
                     videoURL: videoURL,
                     track: analysis.track,
-                    frameIndex: currentIndex
+                    frameIndex: currentIndex,
+                    focus: isZoomed ? PlayerRegion.rect(for: stroke, in: analysis) : nil
                 )
+                .overlay(alignment: .topTrailing) {
+                    Button {
+                        zoomChoice = !isZoomed
+                    } label: {
+                        Label(isZoomed ? "Целиком" : "Крупнее",
+                              systemImage: isZoomed ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                    .padding(10)
+                }
 
                 scrubber
                 phaseBadge
@@ -106,7 +145,7 @@ struct StrokeDetailScreen: View {
                 .foregroundStyle(.secondary)
             }
             Button {
-                onSetRejected(stroke, !rejected)
+                onSetRejected(!rejected)
             } label: {
                 Label(
                     rejected ? "Это удар, вернуть в статистику" : "Это не удар",
@@ -194,6 +233,7 @@ struct StrokeDetailScreen: View {
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
             }
             .frame(height: 160)
+            .chartXScale(domain: stroke.startTime...stroke.endTime)
             .chartXAxisLabel("с")
         }
     }

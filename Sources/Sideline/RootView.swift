@@ -10,23 +10,24 @@ struct RootView: View {
             content
                 .navigationTitle("Sideline")
                 .navigationBarTitleDisplayMode(.inline)
+                // Результаты — отдельный экран: назад возвращает к списку
+                // тренировок, а не заставляет разбирать видео заново.
+                .navigationDestination(isPresented: Binding(
+                    get: { store.isShowingResults },
+                    set: { store.isShowingResults = $0 }
+                )) {
+                    ResultsScreen(store: store)
+                }
         }
     }
 
     @ViewBuilder
     private var content: some View {
         switch store.state {
-        case .idle:
+        case .idle, .ready:
             ImportScreen(store: store)
         case .working(let work):
             WorkingScreen(work: work) { store.reset() }
-        case .ready(let analysis, let url):
-            ResultsScreen(
-                analysis: analysis,
-                videoURL: url,
-                onSetRejected: { stroke, rejected in store.setRejected(rejected, for: stroke) },
-                onReset: { store.reset() }
-            )
         case .failed(let message):
             FailureScreen(message: message) { store.reset() }
         }
@@ -122,6 +123,15 @@ struct ImportScreen: View {
             Section("Как снимать") {
                 ShootingTips()
             }
+
+            #if DEBUG
+            Section {
+                Button("Демо-тренировка из синтетики") { store.createDemoSession() }
+                    .font(.footnote)
+            } footer: {
+                Text("Только в отладочной сборке: в симуляторе Vision не работает.")
+            }
+            #endif
         }
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }

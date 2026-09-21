@@ -90,8 +90,16 @@ public struct MetricSummary: Sendable, Identifiable {
     public let values: [Double]
     public let mean: Double
     public let standardDeviation: Double
+    /// Сколько ударов дали значение. Замах измеряется не у каждого удара,
+    /// и разброс по одному значению — ноль, а не стабильность.
+    public let finiteCount: Int
 
     public var id: MetricKey { key }
+
+    /// Достаточно ли значений, чтобы разброс что-то значил.
+    public func isWellSampled(of total: Int) -> Bool {
+        finiteCount >= 3 && finiteCount * 2 >= total
+    }
 
     /// Разброс относительно порога заметности. >1 — стоит обратить внимание.
     public var instability: Double {
@@ -113,6 +121,7 @@ public struct MetricSummary: Sendable, Identifiable {
         self.key = key
         let clean = values.filter { $0.isFinite }
         self.values = values
+        self.finiteCount = clean.count
         guard !clean.isEmpty else {
             self.mean = .nan
             self.standardDeviation = .nan

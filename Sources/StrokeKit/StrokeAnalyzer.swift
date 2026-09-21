@@ -375,7 +375,7 @@ public struct StrokeAnalyzer: Sendable {
 
     // MARK: - Ряды
 
-    static func buildSignals(track: PoseTrack, handedness: Handedness) -> AnalyzedSignals {
+    public static func buildSignals(track: PoseTrack, handedness: Handedness) -> AnalyzedSignals {
         let frames = track.frames
         let times = frames.map(\.time)
         let scale = torsoScale(frames: frames, fallbackHeight: track.displaySize.height)
@@ -872,7 +872,7 @@ public struct StrokeAnalyzer: Sendable {
             ))
         case .mixed:
             warnings.append(AnalysisWarning(
-                text: "Ракурс по ходу видео меняется — похоже, это монтаж из разных планов. Метрики, зависящие от ракурса, отключены."
+                text: "Ракурс по ходу записи меняется — игрок ходит по корту и подходит к камере. Метрики, зависящие от ракурса, отключены: для них нужна съёмка сбоку с одной точки."
             ))
         case .unknown:
             warnings.append(AnalysisWarning(
@@ -906,7 +906,7 @@ public struct StrokeAnalyzer: Sendable {
 
         if signals.cutIndices.count > 3 {
             warnings.append(AnalysisWarning(
-                text: "В видео нашлось \(signals.cutIndices.count) мест, где скелет разрывается — это склейки монтажа или потеря трекинга. Такие места из анализа выброшены, но если это смонтированный ролик, а не одна съёмка, цифрам верить нельзя: они смешивают разные ракурсы и разных людей."
+                text: "В \(signals.cutIndices.count) местах скелет пропадает или скачет — игрок выходит из кадра, слишком мелкий или его перекрывают; в нарезке из разных планов так выглядят склейки. Эти места из разбора выброшены."
             ))
         }
 
