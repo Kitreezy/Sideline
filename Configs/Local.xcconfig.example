@@ -7,5 +7,5 @@
 
 DEVELOPMENT_TEAM =
 
-// Любой уникальный префикс. Bundle id получится <префикс>.tennisform
+// Любой уникальный префикс. Bundle id получится <префикс>.sideline
 BUNDLE_ID_PREFIX = com.example

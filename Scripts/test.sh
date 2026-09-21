@@ -25,5 +25,5 @@ if [ -z "$UDID" ]; then
 fi
 
 echo "Симулятор: $(xcrun simctl list devices | grep "$UDID" | sed 's/^ *//')"
-xcodebuild test -project TennisForm.xcodeproj -scheme TennisForm \
+xcodebuild test -project Sideline.xcodeproj -scheme Sideline \
     -destination "id=$UDID" "$@"

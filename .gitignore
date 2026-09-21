@@ -1,6 +1,6 @@
 # Проект генерируется из project.yml через xcodegen — в гите его держать незачем,
 # иначе каждый регенерат даёт огромный бессмысленный диф и конфликты.
-TennisForm.xcodeproj/
+Sideline.xcodeproj/
 *.xcworkspace/
 
 # Локальные настройки Xcode
