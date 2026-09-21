@@ -25,7 +25,7 @@ public enum PoseExtractionError: Error, LocalizedError {
 /// остаются только окна ударов, и медиана по ним — это уже не фон,
 /// а сами удары. Поэтому фон замеряется на первом проходе, по всей записи,
 /// и передаётся дальше отдельно.
-public struct BackgroundMotion: Sendable {
+public struct BackgroundMotion: Sendable, Codable {
     public let leftWristSpeedMedian: Double
     public let rightWristSpeedMedian: Double
 
@@ -39,7 +39,9 @@ public struct BackgroundMotion: Sendable {
     }
 }
 
-public struct PoseTrack: Sendable {
+/// Codable — это то, что кэшируется между запусками: Vision стоит минуты,
+/// а всё, что считается из дорожки, — миллисекунды и пересчитывается заново.
+public struct PoseTrack: Sendable, Codable {
     public let frames: [PoseFrame]
     /// Размер кадра после применения ориентации съёмки — в этих координатах лежат точки.
     public let displaySize: CGSize
@@ -85,11 +87,11 @@ public struct PoseExtractor: Sendable {
     public init() {}
 
     /// Гоняет каждый кадр через body-pose. Всё локально, ничего не уходит с устройства.
-    /// `onProgress` вызывается с долей 0...1.
     public func extract(
         from url: URL,
-        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
+        onProgress: @escaping @Sendable (ExtractionProgress) -> Void = { _ in }
     ) async throws -> PoseTrack {
+        onProgress(ExtractionProgress(stage: .opening, fraction: 0))
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw PoseExtractionError.noVideoTrack
@@ -149,7 +151,7 @@ public struct PoseExtractor: Sendable {
                 let progress = min(1, time / duration)
                 if progress - lastProgressReport > 0.01 {
                     lastProgressReport = progress
-                    onProgress(progress)
+                    onProgress(ExtractionProgress(stage: .analysingEverything, fraction: progress))
                 }
             }
         }
@@ -157,7 +159,7 @@ public struct PoseExtractor: Sendable {
         if reader.status == .failed {
             throw PoseExtractionError.readerFailed(reader.error?.localizedDescription ?? "чтение прервалось")
         }
-        onProgress(1)
+        onProgress(ExtractionProgress(stage: .analysingEverything, fraction: 1))
 
         let measuredRate = Self.measuredFrameRate(frames: frames) ?? Double(nominalRate)
         return PoseTrack(

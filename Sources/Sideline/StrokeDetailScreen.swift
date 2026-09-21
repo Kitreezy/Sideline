@@ -6,6 +6,7 @@ struct StrokeDetailScreen: View {
     let analysis: SessionAnalysis
     let stroke: Stroke
     let videoURL: URL
+    let onSetRejected: (Stroke, Bool) -> Void
 
     @State private var frameIndex: Int?
 
@@ -22,6 +23,7 @@ struct StrokeDetailScreen: View {
 
                 scrubber
                 phaseBadge
+                verdict
                 metricsGrid
                 charts
             }
@@ -82,11 +84,41 @@ struct StrokeDetailScreen: View {
             Circle().fill(phase.1).frame(width: 8, height: 8)
             Text(phase.0).font(.subheadline.weight(.medium))
             if currentIndex == stroke.phases.contact {
-                Text("оценка по максимуму скорости кисти")
+                Text(stroke.ballContact != nil ? "измерен по мячу" : "оценка по максимуму скорости кисти")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(stroke.ballContact != nil ? .green : .secondary)
             }
         }
+    }
+
+    // MARK: - Удар или нет
+
+    private var verdict: some View {
+        let rejected = analysis.isRejected(stroke)
+        return VStack(alignment: .leading, spacing: 8) {
+            if !stroke.doubts.isEmpty {
+                Label {
+                    Text(stroke.doubts.map(\.title).joined(separator: " · "))
+                        .font(.caption)
+                } icon: {
+                    Image(systemName: "questionmark.circle")
+                }
+                .foregroundStyle(.secondary)
+            }
+            Button {
+                onSetRejected(stroke, !rejected)
+            } label: {
+                Label(
+                    rejected ? "Это удар, вернуть в статистику" : "Это не удар",
+                    systemImage: rejected ? "arrow.uturn.backward" : "xmark.circle"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(rejected ? .green : .secondary)
+        }
+        .padding()
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
     }
 
     // MARK: - Цифры удара
@@ -110,6 +142,7 @@ struct StrokeDetailScreen: View {
                     key: key,
                     value: stroke.value(key),
                     sessionMean: summaries.first { $0.key == key }?.mean ?? .nan,
+                    band: key.guidance(for: stroke.type).band,
                     disabledReason: key.unreliabilityReason(in: analysis.cameraView)
                 )
             }
@@ -170,6 +203,7 @@ private struct MetricRow: View {
     let key: MetricKey
     let value: Double
     let sessionMean: Double
+    let band: ClosedRange<Double>?
     let disabledReason: String?
 
     @State private var showsHint = false
@@ -217,6 +251,11 @@ private struct MetricRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.trailing, 40)
+                if let band {
+                    Text("Ориентир из тренерской практики: \(Format.value(band.lowerBound, key: key))–\(Format.value(band.upperBound, key: key)) \(key.unit).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.vertical, 2)
