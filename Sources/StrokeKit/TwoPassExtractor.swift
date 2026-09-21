@@ -13,18 +13,22 @@ import Vision
 /// Точность контакта не страдает: внутри окон обрабатывается каждый кадр.
 public struct TwoPassExtractor: Sendable {
     public struct Tuning: Sendable {
-        /// К какой частоте прореживать первый проход. Замах с проводкой
-        /// длятся доли секунды, так что 30 кадров в секунду их не пропустят.
-        public var coarseFrameRate: Double = 30
+        /// К какой частоте прореживать первый проход. Разгон настоящего удара
+        /// длится 0.3–0.5 с; 15 кадров в секунду дают на него 5–7 точек,
+        /// а синтетический вдвое резче удар находится и так (есть тест).
+        public var coarseFrameRate: Double = 15
+        /// Ширина кадра для первого прохода. Модель Vision внутри всё равно
+        /// уменьшает кадр; подать ей маленький — минус треть времени на кадр
+        /// при тех же 98% найденных скелетов (замерено на живой записи).
+        public var coarseDecodeWidth = 640
         public var windows = StrokeWindowFinder.Tuning()
         /// Ниже этого числа кадров прореживать нет смысла — накладные
         /// расходы на второй проход съедят выигрыш.
         public var minFramesToBother: Int = 900
-        /// Первый проход стоит 1/stride полного. При stride 2 он съедает
-        /// половину экономии и разбор выходит дороже одного прохода —
-        /// проверено на записи 60 fps. Два прохода окупаются на слоу-мо,
-        /// то есть ровно там, где полный проход и невыносим.
-        public var minStride: Int = 3
+        /// Первый проход стоит примерно 0.65/stride полного (кадры меньше).
+        /// При stride 2 это треть — окупается, если окна покрывают меньше
+        /// двух третей записи; на тренировке они покрывают пятую часть.
+        public var minStride: Int = 2
         /// Принудительно, в обход проверок — для сравнения режимов.
         public var force = false
 
@@ -58,7 +62,8 @@ public struct TwoPassExtractor: Sendable {
         // Первый проход — примерно 1/stride работы, но время на чтение кадров
         // фиксированное, поэтому ему отводится доля побольше расчётной.
         let coarseShare = 0.3
-        let coarse = try await scan(source: source, shouldAnalyse: { index, _ in
+        let coarseSource = try await VideoSource(url: url, decodeWidth: tuning.coarseDecodeWidth)
+        let coarse = try await scan(source: coarseSource, shouldAnalyse: { index, _ in
             index % stride == 0
         }, progress: { onProgress(ExtractionProgress(stage: .scanning, fraction: $0 * coarseShare)) })
 
@@ -83,20 +88,34 @@ public struct TwoPassExtractor: Sendable {
             )
         }
 
-        let duration = source.duration
-        let fine = try await scan(source: try await VideoSource(url: url), shouldAnalyse: { _, time in
-            windows.contains { $0.contains(time) }
-        }, progress: { share in
-            // Номер окна, в котором сейчас идём: доля времени переводится
-            // обратно во время, и считаем, сколько окон уже позади.
-            let time = share * duration
-            let done = windows.filter { $0.upperBound <= time }.count
-            let current = min(windows.count, done + 1)
-            onProgress(ExtractionProgress(
-                stage: .analysing(window: current, of: windows.count),
-                fraction: coarseShare + share * (1 - coarseShare)
-            ))
-        })
+        // Каждое окно читается своим ридером с перемоткой: декодировать
+        // всё видео заново ради пятой части кадров — лишние минуты.
+        var fine = ScanResult()
+        fine.totalFrames = coarse.totalFrames
+        let totalSpan = windows.reduce(0.0) { $0 + ($1.upperBound - $1.lowerBound) }
+        var doneSpan = 0.0
+
+        for (number, window) in windows.enumerated() {
+            let windowSource = try await VideoSource(
+                url: url,
+                timeRange: CMTimeRange(
+                    start: CMTime(seconds: window.lowerBound, preferredTimescale: 600),
+                    end: CMTime(seconds: window.upperBound, preferredTimescale: 600)
+                )
+            )
+            let span = window.upperBound - window.lowerBound
+            let spanBefore = doneSpan
+            let part = try await scan(source: windowSource, shouldAnalyse: { _, _ in true }, progress: { share in
+                let fraction = totalSpan > 0 ? (spanBefore + share * span) / totalSpan : 1
+                onProgress(ExtractionProgress(
+                    stage: .analysing(window: number + 1, of: windows.count),
+                    fraction: coarseShare + fraction * (1 - coarseShare)
+                ))
+            })
+            fine.frames += part.frames
+            fine.failures += part.failures
+            doneSpan += span
+        }
 
         onProgress(ExtractionProgress(stage: .analysing(window: windows.count, of: windows.count), fraction: 1))
         return fine.track(
@@ -170,8 +189,8 @@ public struct TwoPassExtractor: Sendable {
                 PoseFrame(time: time, joints: chosen.map { candidates[$0].joints } ?? [:])
             )
 
-            if source.duration > 0 {
-                let share = min(1, time / source.duration)
+            if source.span > 0 {
+                let share = min(1, max(0, (time - source.spanStart) / source.span))
                 if share - lastReport > 0.01 {
                     lastReport = share
                     progress(share)
@@ -205,12 +224,17 @@ public struct TwoPassExtractor: Sendable {
 struct VideoSource {
     let reader: AVAssetReader
     let output: AVAssetReaderTrackOutput
+    /// Размер кадра после поворота — в этих координатах лежат точки скелета,
+    /// даже если декодировали уменьшенную копию.
     let displaySize: CGSize
     let orientation: CGImagePropertyOrientation
     let duration: TimeInterval
     let nominalFrameRate: Float
+    /// Читаемый отрезок — для прогресса.
+    let spanStart: TimeInterval
+    let span: TimeInterval
 
-    init(url: URL, timeRange: CMTimeRange? = nil) async throws {
+    init(url: URL, timeRange: CMTimeRange? = nil, decodeWidth: Int? = nil) async throws {
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw PoseExtractionError.noVideoTrack
@@ -223,12 +247,24 @@ struct VideoSource {
         orientation = PoseExtractor.orientation(for: transform)
         displaySize = PoseExtractor.displaySize(naturalSize: naturalSize, orientation: orientation)
 
+        if let timeRange {
+            spanStart = timeRange.start.seconds
+            span = timeRange.duration.seconds
+        } else {
+            spanStart = 0
+            span = duration
+        }
+
         reader = try AVAssetReader(asset: asset)
         if let timeRange { reader.timeRange = timeRange }
-        output = AVAssetReaderTrackOutput(
-            track: track,
-            outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-        )
+        var settings: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        if let decodeWidth, decodeWidth < Int(naturalSize.width) {
+            // Декодер уменьшает сам — дешевле, чем масштабировать потом.
+            let scale = Double(decodeWidth) / Double(naturalSize.width)
+            settings[kCVPixelBufferWidthKey as String] = decodeWidth
+            settings[kCVPixelBufferHeightKey as String] = Int((Double(naturalSize.height) * scale).rounded())
+        }
+        output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
         output.alwaysCopiesSampleData = false
         reader.add(output)
         guard reader.startReading() else {

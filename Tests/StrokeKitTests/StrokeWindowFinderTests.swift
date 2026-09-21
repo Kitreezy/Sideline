@@ -36,9 +36,11 @@ private func coarseTrack(
 
 final class StrokeWindowFinderTests: XCTestCase {
     func testFindsAWindowAroundEveryStroke() {
-        let contacts = [1.0, 3.0, 5.0]
+        // Удары через 4 с: с запасом 1.2 с окна не пересекаются, и каждому
+        // удару достаётся своё.
+        let contacts = [1.5, 5.5, 9.5]
         let windows = StrokeWindowFinder.candidateWindows(
-            frames: coarseTrack(contactTimes: contacts), duration: 6
+            frames: coarseTrack(contactTimes: contacts, duration: 12), duration: 12
         )
         XCTAssertEqual(windows.count, contacts.count)
         for contact in contacts {
@@ -46,6 +48,21 @@ final class StrokeWindowFinderTests: XCTestCase {
                 windows.contains { $0.contains(contact) },
                 "удар на \(contact) с не попал ни в одно окно"
             )
+        }
+    }
+
+    func testSparseCoarsePassStillFindsEveryStroke() {
+        // Первый проход на 60 fps идёт с шагом 4 — это 15 кадров в секунду.
+        // Синтетический удар здесь резче настоящего (разгон 0.16 с против
+        // 0.3–0.5), так что если находится он — найдётся и настоящий.
+        for fps in [20.0, 15.0] {
+            let contacts = [1.5, 5.5, 9.5]
+            let windows = StrokeWindowFinder.candidateWindows(
+                frames: coarseTrack(contactTimes: contacts, fps: fps, duration: 12), duration: 12
+            )
+            for contact in contacts {
+                XCTAssertTrue(windows.contains { $0.contains(contact) }, "\(fps) fps: удар на \(contact) с потерян")
+            }
         }
     }
 
