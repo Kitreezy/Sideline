@@ -106,30 +106,92 @@ struct ResultsScreen: View {
     @ViewBuilder
     private func typeSection(_ type: StrokeType) -> some View {
         let strokes = analysis.strokes(of: type)
+        let insights = InsightEngine.insights(for: analysis, type: type)
+        let strength = InsightEngine.strength(for: analysis, type: type)
+
         Section {
-            if strokes.count < 2 {
-                Text("Один удар — сравнивать не с чем.")
+            if strokes.count < InsightEngine.minStrokes {
+                Text("Нужно хотя бы \(InsightEngine.minStrokes) ударов, чтобы делать выводы. Сейчас \(strokes.count).")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            } else if insights.isEmpty {
+                Label("Ничего заметного: разброс небольшой, ориентиры в норме.", systemImage: "checkmark.circle")
+                    .font(.subheadline)
+                    .foregroundStyle(.green)
             } else {
-                ForEach(analysis.ranked(of: type).prefix(4)) { summary in
-                    InstabilityRow(summary: summary)
+                ForEach(insights) { insight in
+                    InsightRow(insight: insight)
                 }
             }
+            if let strength {
+                InsightRow(insight: strength)
+            }
         } header: {
-            Text("\(type.title) — \(Format.strokeCount(strokes.count))")
+            Text("\(type.title) — \(Format.strokeCount(strokes.count)) · над чем работать")
         } footer: {
             if type == .unknown {
                 Text("Удары, у которых не удалось определить тип: разворот корпуса в кадре неоднозначный.")
-            } else if strokes.count >= 2 {
-                Text("Сравнение идёт только с тобой же, внутри одного типа удара.")
+            } else if strokes.count >= InsightEngine.minStrokes {
+                Text("Ориентиры — из тренерской практики, не измеренная норма. Разброс и «лучшие против худших» — сравнение только с тобой же.")
+            }
+        }
+
+        if strokes.count >= 2 {
+            Section("\(type.title) — все метрики по разбросу") {
+                ForEach(analysis.ranked(of: type)) { summary in
+                    InstabilityRow(summary: summary, type: type)
+                }
             }
         }
     }
 }
 
+private struct InsightRow: View {
+    let insight: Insight
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: icon)
+                    .foregroundStyle(color)
+                Text(insight.title)
+                    .font(.subheadline.weight(.semibold))
+            }
+            Text(insight.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let cue = insight.cue {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "figure.tennis")
+                        .font(.caption)
+                    Text(cue)
+                        .font(.caption)
+                }
+                .foregroundStyle(.primary)
+                .padding(8)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var icon: String {
+        switch insight.kind {
+        case .spread: return "waveform.path.ecg"
+        case .shortfall: return "arrow.down.right.circle"
+        case .bestVsWorst: return "arrow.left.arrow.right.circle"
+        case .strength: return "checkmark.circle.fill"
+        }
+    }
+
+    private var color: Color {
+        insight.kind == .strength ? .green : .orange
+    }
+}
+
 private struct InstabilityRow: View {
     let summary: MetricSummary
+    let type: StrokeType
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -156,6 +218,9 @@ private struct InstabilityRow: View {
                 Text("в среднем \(Format.valueWithUnit(summary.mean, key: summary.key))")
                 if let range = summary.range, range.lowerBound.isFinite {
                     Text("· от \(Format.value(range.lowerBound, key: summary.key)) до \(Format.value(range.upperBound, key: summary.key))")
+                }
+                if let band = summary.key.guidance(for: type).band {
+                    Text("· ориентир \(Format.value(band.lowerBound, key: summary.key))–\(Format.value(band.upperBound, key: summary.key))")
                 }
             }
             .font(.caption2)

@@ -142,6 +142,7 @@ struct StrokeDetailScreen: View {
                     key: key,
                     value: stroke.value(key),
                     sessionMean: summaries.first { $0.key == key }?.mean ?? .nan,
+                    band: key.guidance(for: stroke.type).band,
                     disabledReason: key.unreliabilityReason(in: analysis.cameraView)
                 )
             }
@@ -202,6 +203,7 @@ private struct MetricRow: View {
     let key: MetricKey
     let value: Double
     let sessionMean: Double
+    let band: ClosedRange<Double>?
     let disabledReason: String?
 
     @State private var showsHint = false
@@ -249,6 +251,11 @@ private struct MetricRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.trailing, 40)
+                if let band {
+                    Text("Ориентир из тренерской практики: \(Format.value(band.lowerBound, key: key))–\(Format.value(band.upperBound, key: key)) \(key.unit).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.vertical, 2)
