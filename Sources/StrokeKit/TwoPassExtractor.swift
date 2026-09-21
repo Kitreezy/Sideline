@@ -210,7 +210,7 @@ struct VideoSource {
     let duration: TimeInterval
     let nominalFrameRate: Float
 
-    init(url: URL) async throws {
+    init(url: URL, timeRange: CMTimeRange? = nil) async throws {
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw PoseExtractionError.noVideoTrack
@@ -224,6 +224,7 @@ struct VideoSource {
         displaySize = PoseExtractor.displaySize(naturalSize: naturalSize, orientation: orientation)
 
         reader = try AVAssetReader(asset: asset)
+        if let timeRange { reader.timeRange = timeRange }
         output = AVAssetReaderTrackOutput(
             track: track,
             outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]

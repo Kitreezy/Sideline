@@ -14,12 +14,14 @@ final class AnalysisStore {
         enum Stage: Equatable {
             case copying
             case extracting(ExtractionProgress.Stage)
+            case trackingBall
             case computing
 
             var title: String {
                 switch self {
                 case .copying: return "Копирую видео из галереи"
                 case .extracting(let stage): return stage.title
+                case .trackingBall: return "Ищу мяч у ракетки"
                 case .computing: return "Считаю удары"
                 }
             }
@@ -158,15 +160,29 @@ final class AnalysisStore {
                 try Task.checkCancellation()
 
                 self.state = .working(Work(stage: .computing, fraction: 1, remaining: nil))
-                var analysis = StrokeAnalyzer().analyze(track: track, handedness: hand)
+                let first = StrokeAnalyzer().analyze(track: track, handedness: hand)
                 try Task.checkCancellation()
 
+                // Третий проход — мяч, только в окнах вокруг найденных ударов.
+                // Дешёвый: детектор траекторий стоит пару миллисекунд на кадр.
+                let tracker = BallTracker()
+                let windows = tracker.windows(around: first.strokes.map(\.contactTime), duration: track.duration)
+                self.state = .working(Work(stage: .trackingBall, fraction: 0, remaining: nil))
+                self.beginStage("ball")
+                let trajectories = try await tracker.trajectories(in: url, windows: windows) { progress in
+                    Task { @MainActor [weak self] in self?.report(.trackingBall, fraction: progress) }
+                }
+                try Task.checkCancellation()
+
+                self.state = .working(Work(stage: .computing, fraction: 1, remaining: nil))
+                var analysis = StrokeAnalyzer().analyze(track: track, handedness: hand, ballTrajectories: trajectories)
                 self.overrides.apply(to: &analysis)
 
                 // Сохраняем до показа: результат не должен зависеть от того,
                 // дождётся ли пользователь экрана.
                 let saved = try self.sessions.save(
-                    track: track, analysis: analysis, handedness: hand, videoURL: url
+                    track: track, ballTrajectories: trajectories, analysis: analysis,
+                    handedness: hand, videoURL: url
                 )
                 self.sessions.clearPending()
                 self.currentSession = saved.session
@@ -190,7 +206,9 @@ final class AnalysisStore {
         state = .working(Work(stage: .computing, fraction: 1, remaining: nil))
         do {
             let loaded = try sessions.load(session)
-            var analysis = StrokeAnalyzer().analyze(track: loaded.track, handedness: session.handedness)
+            var analysis = StrokeAnalyzer().analyze(
+                track: loaded.track, handedness: session.handedness, ballTrajectories: loaded.ballTrajectories
+            )
             overrides.apply(to: &analysis)
             handedness = session.handedness
             currentSession = session
@@ -266,6 +284,7 @@ final class AnalysisStore {
         case .extracting(.scanning): return "scan"
         case .extracting(.analysing): return "analyse"
         case .extracting(.analysingEverything): return "full"
+        case .trackingBall: return "ball"
         case .computing: return "compute"
         }
     }

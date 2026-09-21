@@ -12,13 +12,13 @@ private func session(
     let signals = AnalyzedSignals(
         times: [], wristSpeed: empty, elbowAngle: empty, shoulderAngle: empty,
         hipAngle: empty, kneeAngle: empty, wristX: empty, wristY: empty,
-        hipX: empty, hipY: empty, torsoScale: 200, cutIndices: []
+        hipX: empty, hipY: empty, torsoScale: 200, torsoScaleSeries: empty, cutIndices: []
     )
     let phases = StrokePhases(start: 0, transition: 1, contact: 2, end: 3, hasBackswing: false)
     let shape = StrokeShape(forwardDisplacement: 2, forwardPath: 2, followThrough: 1, prominence: 4, hasBackswing: false)
     let strokes = rows.enumerated().map { index, values in
         Stroke(
-            id: index, type: type, shape: shape, doubts: [], phases: phases,
+            id: index, type: type, shape: shape, doubts: [], ballContact: nil, phases: phases,
             startTime: Double(index), contactTime: Double(index) + 0.5, endTime: Double(index) + 1,
             values: values
         )

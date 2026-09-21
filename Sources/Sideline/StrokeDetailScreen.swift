@@ -84,9 +84,9 @@ struct StrokeDetailScreen: View {
             Circle().fill(phase.1).frame(width: 8, height: 8)
             Text(phase.0).font(.subheadline.weight(.medium))
             if currentIndex == stroke.phases.contact {
-                Text("оценка по максимуму скорости кисти")
+                Text(stroke.ballContact != nil ? "измерен по мячу" : "оценка по максимуму скорости кисти")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(stroke.ballContact != nil ? .green : .secondary)
             }
         }
     }

@@ -13,7 +13,19 @@ public struct AnalyzedSignals: Sendable {
     public let wristY: Signal
     public let hipX: Signal            // центр таза со стороны бьющей руки
     public let hipY: Signal
-    public let torsoScale: Double      // пикселей в одной «длине корпуса»
+    /// Медианная длина корпуса за всё видео — запасной масштаб.
+    public let torsoScale: Double
+    /// Длина корпуса в каждом кадре. Игрок ходит по корту и подходит
+    /// к камере — его размер в кадре меняется втрое, и одна медиана на всё
+    /// видео превращает шаг у камеры в «удар».
+    public let torsoScaleSeries: Signal
+
+    /// Масштаб в конкретном кадре, с запасным значением там, где корпус не виден.
+    public func scale(at index: Int) -> Double {
+        guard index >= 0, index < torsoScaleSeries.count else { return torsoScale }
+        let value = torsoScaleSeries.values[index]
+        return value.isFinite && value > 1 ? value : torsoScale
+    }
     /// Индексы, перед которыми скелет разрывается: склейка в ролике,
     /// потеря трекинга или перескок Vision на другого человека в кадре.
     public let cutIndices: Set<Int>
@@ -37,6 +49,19 @@ public struct StrokePhases: Sendable {
     /// не считается: ноль здесь означал бы «замаха не было», а на деле
     /// это «мы его не увидели».
     public let hasBackswing: Bool
+
+    /// Тот же удар, но с контактом, измеренным по мячу. Фазы до и после
+    /// подтягиваются так, чтобы порядок не нарушился.
+    func replacingContact(with index: Int) -> StrokePhases {
+        let contact = max(start + 1, min(end - 1, index))
+        return StrokePhases(
+            start: start,
+            transition: min(transition, contact - 1),
+            contact: contact,
+            end: end,
+            hasBackswing: hasBackswing && transition < contact
+        )
+    }
 }
 
 /// Геометрия движения кисти в окне удара. По этим признакам отличается
@@ -68,12 +93,18 @@ public enum StrokeDoubt: String, Sendable, Codable, CaseIterable {
     case wandering
     /// Пик едва выше фона: рука просто болталась при ходьбе.
     case noBurst
+    /// Скелет в момент удара потерялся — форму движения не измерить.
+    case lostTracking
+    /// Мяч отслеживался на этой записи, но к этому взмаху не прилетал.
+    case noBall
 
     public var title: String {
         switch self {
         case .tinySwing: return "Кисть почти не сдвинулась"
         case .wandering: return "Движение петляло"
         case .noBurst: return "Нет выраженного всплеска"
+        case .lostTracking: return "Скелет терялся в момент удара"
+        case .noBall: return "Мяч у ракетки не пойман — проверь по кадру"
         }
     }
 }
@@ -84,6 +115,8 @@ public struct Stroke: Sendable, Identifiable {
     public let shape: StrokeShape
     /// Автоматические сомнения. Пусто — похоже на настоящий удар.
     public let doubts: [StrokeDoubt]
+    /// Мяч, оборвавшийся у кисти. Если есть — контакт измерен, а не оценён.
+    public let ballContact: BallContact?
     public let phases: StrokePhases
     public let startTime: TimeInterval
     public let contactTime: TimeInterval
@@ -132,6 +165,11 @@ public struct SessionAnalysis: Sendable {
 
     public var acceptedStrokes: [Stroke] {
         strokes.filter { !rejectedIDs.contains($0.id) }
+    }
+
+    /// Ударов, у которых контакт измерен по мячу, а не оценён по кисти.
+    public var ballConfirmedCount: Int {
+        strokes.filter { $0.ballContact != nil }.count
     }
 
     public var rejectedStrokes: [Stroke] {
@@ -186,8 +224,10 @@ public struct StrokeAnalyzer: Sendable {
     public struct Tuning: Sendable {
         /// Ниже этой скорости кисти это не удар, а подготовка.
         public var minPeakSpeed: Double = 2.0
-        /// Два удара не могут идти подряд быстрее, чем раз в столько секунд.
-        public var minStrokeSeparation: TimeInterval = 0.6
+        /// Два удара одного игрока не могут идти подряд быстрее: мяч должен
+        /// слетать на ту сторону и вернуться. На живой записи при 0.6 с один
+        /// бэкхенд засчитывался дважды — контакт и проводка.
+        public var minStrokeSeparation: TimeInterval = 1.0
         /// Границы удара — там, где скорость упала до этой доли от пика.
         public var boundaryFraction: Double = 0.25
         public var maxBackswing: TimeInterval = 1.2
@@ -228,7 +268,11 @@ public struct StrokeAnalyzer: Sendable {
         self.tuning = tuning
     }
 
-    public func analyze(track: PoseTrack, handedness: Handedness) -> SessionAnalysis {
+    public func analyze(
+        track: PoseTrack,
+        handedness: Handedness,
+        ballTrajectories: [BallTrajectory]? = nil
+    ) -> SessionAnalysis {
         let signals = Self.buildSignals(track: track, handedness: handedness)
         let threshold = Self.strokeThreshold(
             signals.wristSpeed,
@@ -244,7 +288,26 @@ public struct StrokeAnalyzer: Sendable {
 
         var strokes: [Stroke] = []
         for (order, peak) in peaks.enumerated() {
-            guard let phases = phases(around: peak, signals: signals) else { continue }
+            guard let swing = phases(around: peak, signals: signals) else { continue }
+
+            // Форма движения описывает сам взмах — она считается по пику скорости,
+            // независимо от того, где потом окажется контакт.
+            let shape = Self.shape(of: swing, signals: signals)
+
+            // Мяч, оборвавшийся у кисти, даёт контакт точнее пика скорости:
+            // на шумном скелете пик легко приходится на проводку.
+            var phases = swing
+            var ballContact: BallContact?
+            if let ballTrajectories {
+                ballContact = BallContactMatcher.contact(
+                    near: signals.times[peak], trajectories: ballTrajectories, signals: signals
+                )
+                if let contact = ballContact,
+                   let index = Self.frameIndex(nearest: contact.time, in: signals.times) {
+                    phases = phases.replacingContact(with: index)
+                }
+            }
+
             let values = Self.metrics(for: phases, signals: signals, handedness: handedness)
             let type = StrokeClassifier.classify(
                 phases: phases,
@@ -252,13 +315,16 @@ public struct StrokeAnalyzer: Sendable {
                 signals: signals,
                 handedness: handedness
             )
-            let shape = Self.shape(of: phases, signals: signals)
+            // Прилетевший издалека и оборвавшийся у кисти мяч — это и есть удар.
+            // Эвристики по форме против такого свидетельства не аргумент.
+            let doubts = ballContact != nil ? [] : doubts(about: shape)
             strokes.append(
                 Stroke(
                     id: order,
                     type: type,
                     shape: shape,
-                    doubts: doubts(about: shape),
+                    doubts: doubts,
+                    ballContact: ballContact,
                     phases: phases,
                     startTime: signals.times[phases.start],
                     contactTime: signals.times[phases.contact],
@@ -266,6 +332,10 @@ public struct StrokeAnalyzer: Sendable {
                     values: values
                 )
             )
+        }
+
+        if ballTrajectories != nil {
+            strokes = Self.applyingBallVerdict(to: strokes)
         }
 
         let cameraView = CameraViewDetector.detect(frames: track.frames)
@@ -322,6 +392,23 @@ public struct StrokeAnalyzer: Sendable {
             }
         }
 
+        // Размер игрока меняется медленно — сглаживаем сильно, чтобы замах
+        // (шея и таз чуть расходятся) не читался как приближение к камере.
+        let scaleSeries = SignalProcessing.perSegment(
+            Signal(times: times, values: frames.map { frame in
+                guard let neck = frame.point(.neck, minConfidence: 0.5),
+                      let root = frame.point(.root, minConfidence: 0.5) else { return .nan }
+                let length = Geometry.distance(neck, root)
+                return length > 1 ? length : .nan
+            }),
+            boundaries: cuts
+        ) { SignalProcessing.smooth(SignalProcessing.interpolateGaps($0, maxGapSeconds: 1.0), sigmaSeconds: 0.5) }
+
+        func scaleAt(_ index: Int) -> Double {
+            let value = scaleSeries.values[index]
+            return value.isFinite && value > 1 ? value : scale
+        }
+
         let wristX = series { frame in
             frame.point(handedness.wrist).map { Double($0.x) } ?? .nan
         }
@@ -335,7 +422,7 @@ public struct StrokeAnalyzer: Sendable {
         for i in 0..<times.count {
             let a = vx.values[i], b = vy.values[i]
             guard !a.isNaN, !b.isNaN else { continue }
-            speedValues[i] = (a * a + b * b).squareRoot() / scale
+            speedValues[i] = (a * a + b * b).squareRoot() / scaleAt(i)
         }
         let wristSpeed = SignalProcessing.perSegment(
             Signal(times: times, values: speedValues),
@@ -387,6 +474,7 @@ public struct StrokeAnalyzer: Sendable {
             hipX: hipX,
             hipY: hipY,
             torsoScale: scale,
+            torsoScaleSeries: scaleSeries,
             cutIndices: cuts
         )
     }
@@ -582,10 +670,48 @@ public struct StrokeAnalyzer: Sendable {
         return index
     }
 
+    static func frameIndex(nearest time: TimeInterval, in times: [TimeInterval]) -> Int? {
+        guard !times.isEmpty else { return nil }
+        var lo = 0, hi = times.count - 1
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if times[mid] < time { lo = mid + 1 } else { hi = mid }
+        }
+        if lo > 0, abs(times[lo - 1] - time) < abs(times[lo] - time) { return lo - 1 }
+        return lo
+    }
+
+    /// Когда мяч на этой записи ловится, взмахи без мяча уходят на проверку,
+    /// а не в статистику: на живой записи по форме движения они почти все
+    /// оказались ложными — стоящий игрок с ракеткой по скелету неотличим
+    /// от бьющего. Кадр контакта в списке делает проверку одним свайпом.
+    /// Когда мяч не пойман ни разу (яркий фон, слишком далеко), «мяча нет»
+    /// ничего не значит, и форма остаётся единственным судьёй.
+    static func applyingBallVerdict(to strokes: [Stroke]) -> [Stroke] {
+        let confirmed = strokes.filter { $0.ballContact != nil }.count
+        guard confirmed >= 5 else { return strokes }
+
+        return strokes.map { stroke in
+            guard stroke.ballContact == nil, !stroke.doubts.contains(.noBall) else { return stroke }
+            return Stroke(
+                id: stroke.id, type: stroke.type, shape: stroke.shape,
+                doubts: stroke.doubts + [.noBall],
+                ballContact: nil, phases: stroke.phases,
+                startTime: stroke.startTime, contactTime: stroke.contactTime, endTime: stroke.endTime,
+                values: stroke.values
+            )
+        }
+    }
+
     /// Что в форме движения не похоже на удар. Каждая проверка независима,
     /// чтобы в интерфейсе было видно, за что именно удар попал под сомнение.
     func doubts(about shape: StrokeShape) -> [StrokeDoubt] {
         var result: [StrokeDoubt] = []
+        // Смещение не посчиталось — кисти в кадре не было. Ударом это
+        // считать нельзя: не «не удар», а «не знаем», и в статистику не идёт.
+        if !shape.forwardDisplacement.isFinite {
+            return [.lostTracking]
+        }
         if shape.forwardDisplacement.isFinite, shape.forwardDisplacement < tuning.minForwardDisplacement {
             result.append(.tinySwing)
         }
@@ -601,7 +727,7 @@ public struct StrokeAnalyzer: Sendable {
     // MARK: - Форма удара
 
     static func shape(of phases: StrokePhases, signals: AnalyzedSignals) -> StrokeShape {
-        let scale = signals.torsoScale
+        let scale = signals.scale(at: phases.contact)
 
         func point(_ index: Int) -> (x: Double, y: Double)? {
             let x = signals.wristX.values[index], y = signals.wristY.values[index]
@@ -652,7 +778,7 @@ public struct StrokeAnalyzer: Sendable {
         var values: [MetricKey: Double] = [:]
         let contact = phases.contact
 
-        values[.peakWristSpeed] = signals.wristSpeed.values[contact]
+        values[.peakWristSpeed] = extremum(signals.wristSpeed, from: phases.start, to: phases.end, pick: Swift.max)
         values[.elbowAtContact] = signals.elbowAngle.values[contact]
 
         values[.shoulderRotationRange] = spread(signals.shoulderAngle, from: phases.start, to: phases.end)
@@ -680,9 +806,10 @@ public struct StrokeAnalyzer: Sendable {
         let wristXValue = signals.wristX.values[frameIndex]
         let hipPoint = signals.hipReference(at: frameIndex)
 
+        let contactScale = signals.scale(at: frameIndex)
         if let hipPoint, wristYValue.isFinite {
             // Ось Y растёт вниз, поэтому «выше таза» — это меньшее значение.
-            values[.contactHeight] = (hipPoint.y - wristYValue) / signals.torsoScale
+            values[.contactHeight] = (hipPoint.y - wristYValue) / contactScale
         } else {
             values[.contactHeight] = .nan
         }
@@ -691,7 +818,7 @@ public struct StrokeAnalyzer: Sendable {
             // Знак скорости кисти на контакте задаёт, где для игрока «вперёд».
             let vx = SignalProcessing.derivative(signals.wristX).values[frameIndex]
             let forward: Double = vx.isFinite && vx != 0 ? (vx > 0 ? 1 : -1) : 1
-            values[.contactDepth] = (wristXValue - hipPoint.x) * forward / signals.torsoScale
+            values[.contactDepth] = (wristXValue - hipPoint.x) * forward / contactScale
         } else {
             values[.contactDepth] = .nan
         }

@@ -81,6 +81,7 @@ final class SessionStore {
     /// после этого недействителен.
     func save(
         track: PoseTrack,
+        ballTrajectories: [BallTrajectory],
         analysis: SessionAnalysis,
         handedness: Handedness,
         videoURL: URL
@@ -96,6 +97,7 @@ final class SessionStore {
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         try encoder.encode(track).write(to: dir.appending(path: "track.plist"), options: .atomic)
+        try encoder.encode(ballTrajectories).write(to: dir.appending(path: "ball.plist"), options: .atomic)
 
         var typeCounts: [String: Int] = [:]
         for stroke in analysis.acceptedStrokes { typeCounts[stroke.type.rawValue, default: 0] += 1 }
@@ -115,13 +117,16 @@ final class SessionStore {
         return (session, videoDestination)
     }
 
-    func load(_ session: SavedSession) throws -> (track: PoseTrack, videoURL: URL) {
+    func load(_ session: SavedSession) throws -> (track: PoseTrack, ballTrajectories: [BallTrajectory]?, videoURL: URL) {
         let dir = directory(for: session.id)
         guard let data = try? Data(contentsOf: dir.appending(path: "track.plist")) else {
             throw SessionStoreError.missingTrack
         }
         let track = try PropertyListDecoder().decode(PoseTrack.self, from: data)
-        return (track, dir.appending(path: session.videoFileName))
+        // Старые сессии без мяча открываются как раньше — без него.
+        let ball = (try? Data(contentsOf: dir.appending(path: "ball.plist")))
+            .flatMap { try? PropertyListDecoder().decode([BallTrajectory].self, from: $0) }
+        return (track, ball, dir.appending(path: session.videoFileName))
     }
 
     /// Обновляет число ударов в списке после того, как пользователь

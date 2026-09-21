@@ -85,7 +85,7 @@ public enum StrokeClassifier {
 
             let axis = CGPoint(x: dominant.x - other.x, y: dominant.y - other.y)
             let projection = Double(axis.x) * forward.dx + Double(axis.y) * forward.dy
-            total += projection / signals.torsoScale
+            total += projection / signals.scale(at: index)
             counted += 1
         }
 
@@ -106,7 +106,7 @@ public enum StrokeClassifier {
               let neck = frame.point(.neck),
               signals.torsoScale > 0
         else { return nil }
-        return Double(neck.y - wrist.y) / signals.torsoScale
+        return Double(neck.y - wrist.y) / signals.scale(at: phases.contact)
     }
 
     /// Куда летит ракетка в момент контакта — это и есть «вперёд» для игрока.

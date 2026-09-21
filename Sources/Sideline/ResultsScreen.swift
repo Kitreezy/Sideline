@@ -12,6 +12,9 @@ struct ResultsScreen: View {
             Section {
                 LabeledContent("Ракурс", value: analysis.cameraView.title)
                 LabeledContent("Ударов", value: Format.strokeCount(analysis.acceptedStrokes.count))
+                if analysis.ballConfirmedCount > 0 {
+                    LabeledContent("Подтверждено мячом", value: "\(analysis.ballConfirmedCount)")
+                }
                 if !analysis.rejectedStrokes.isEmpty {
                     LabeledContent("Отсеяно", value: Format.strokeCount(analysis.rejectedStrokes.count))
                 }
@@ -59,7 +62,7 @@ struct ResultsScreen: View {
                     }
                 }
 
-                Section("Удары") {
+                Section {
                     ForEach(analysis.acceptedStrokes) { stroke in
                         NavigationLink {
                             StrokeDetailScreen(
@@ -67,8 +70,21 @@ struct ResultsScreen: View {
                                 onSetRejected: onSetRejected
                             )
                         } label: {
-                            StrokeRow(stroke: stroke)
+                            StrokeRow(stroke: stroke, videoURL: videoURL)
                         }
+                        .swipeActions(edge: .trailing) {
+                            Button("Не удар", role: .destructive) { onSetRejected(stroke, true) }
+                        }
+                    }
+                } header: {
+                    Text("Удары")
+                } footer: {
+                    if analysis.ballConfirmedCount >= 5 {
+                        Text("Зелёный мяч — контакт измерен по мячу. Всё, что мяч не подтвердил, ждёт в разделе «на проверку».")
+                    } else if analysis.ballConfirmedCount > 0 {
+                        Text("Зелёный мяч — контакт измерен по мячу. Оранжевый знак — удар найден по движению кисти, мяч у ракетки не пойман: посмотри кадр и, если это не удар, смахни влево.")
+                    } else {
+                        Text("Мяч у ракетки не пойман ни разу — удары найдены по движению кисти. Посмотри кадры и смахни влево то, что не удар.")
                     }
                 }
             }
@@ -82,7 +98,7 @@ struct ResultsScreen: View {
                                 onSetRejected: onSetRejected
                             )
                         } label: {
-                            RejectedRow(stroke: stroke)
+                            RejectedRow(stroke: stroke, videoURL: videoURL)
                         }
                         .swipeActions(edge: .leading) {
                             Button("Это удар") { onSetRejected(stroke, false) }
@@ -90,9 +106,13 @@ struct ResultsScreen: View {
                         }
                     }
                 } header: {
-                    Text("Похоже, не удары — \(analysis.rejectedStrokes.count)")
+                    Text(analysis.ballConfirmedCount >= 5
+                         ? "На проверку — \(analysis.rejectedStrokes.count)"
+                         : "Похоже, не удары — \(analysis.rejectedStrokes.count)")
                 } footer: {
-                    Text("Всплески скорости кисти без формы удара: сплит-степ, перехват ракетки, подбор мяча. В статистику не идут. Если это всё-таки удар — смахни вправо или открой и верни.")
+                    Text(analysis.ballConfirmedCount >= 5
+                         ? "Мяч на этой записи ловится, а у этих взмахов не пойман: чаще всего это не удары, но не всегда. В статистику они не идут. Посмотри кадр — если удар, смахни вправо."
+                         : "Всплески скорости кисти без формы удара: сплит-степ, перехват ракетки, подбор мяча. В статистику не идут. Если это всё-таки удар — смахни вправо или открой и верни.")
                 }
             }
         }
@@ -232,13 +252,12 @@ private struct InstabilityRow: View {
 
 private struct RejectedRow: View {
     let stroke: Stroke
+    let videoURL: URL
 
     var body: some View {
-        HStack(alignment: .top) {
-            Text("#\(stroke.id + 1)")
-                .font(.headline.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 36, alignment: .leading)
+        HStack(alignment: .top, spacing: 10) {
+            ContactThumbnail(videoURL: videoURL, time: stroke.contactTime)
+                .opacity(0.6)
             VStack(alignment: .leading, spacing: 2) {
                 Text(Format.time(stroke.contactTime)).font(.subheadline)
                 Text(stroke.doubts.isEmpty
@@ -253,12 +272,11 @@ private struct RejectedRow: View {
 
 private struct StrokeRow: View {
     let stroke: Stroke
+    let videoURL: URL
 
     var body: some View {
-        HStack {
-            Text("#\(stroke.id + 1)")
-                .font(.headline.monospacedDigit())
-                .frame(width: 36, alignment: .leading)
+        HStack(spacing: 10) {
+            ContactThumbnail(videoURL: videoURL, time: stroke.contactTime)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(stroke.type.title)
@@ -266,6 +284,12 @@ private struct StrokeRow: View {
                     Text(Format.time(stroke.contactTime))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Spacer()
+                    if stroke.ballContact != nil {
+                        Image(systemName: "tennisball.fill").foregroundStyle(.green)
+                    } else {
+                        Image(systemName: "questionmark.circle").foregroundStyle(.orange)
+                    }
                 }
                 Text("скорость \(Format.valueWithUnit(stroke.value(.peakWristSpeed), key: .peakWristSpeed)) · локоть \(Format.valueWithUnit(stroke.value(.elbowAtContact), key: .elbowAtContact))")
                     .font(.caption)

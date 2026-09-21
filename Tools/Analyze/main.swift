@@ -55,7 +55,30 @@ struct Runner {
         print("прыжков шеи >0.5 корпуса за кадр: \(jumps)")
         print("самый большой прыжок: \(String(format: "%.2f", biggest)) корпуса за кадр")
 
-        let analysis = StrokeAnalyzer().analyze(track: track, handedness: hand)
+        var analysis = StrokeAnalyzer().analyze(track: track, handedness: hand)
+
+        // Мяч: только по окнам вокруг найденных ударов.
+        var trajectories: [BallTrajectory] = []
+        if !args.contains("--no-ball") {
+            let tracker = BallTracker()
+            let windows = tracker.windows(around: analysis.strokes.map(\.contactTime), duration: track.duration)
+            let ballStart = Date()
+            trajectories = try await tracker.trajectories(in: url, windows: windows)
+            print("мяч: \(trajectories.count) траекторий в \(windows.count) окнах за \(String(format: "%.0f", Date().timeIntervalSince(ballStart))) с")
+            analysis = StrokeAnalyzer().analyze(track: track, handedness: hand, ballTrajectories: trajectories)
+            print("ударов подтверждено мячом: \(analysis.ballConfirmedCount) из \(analysis.strokes.count)")
+
+            // --debug-ball <время>: кандидаты вокруг одного удара
+            if let flag = args.firstIndex(of: "--debug-ball"), args.count > flag + 1, let t = Double(args[flag + 1]) {
+                print("\n=== КАНДИДАТЫ МЯЧА около \(t) с ===")
+                let candidates = BallContactMatcher.candidates(near: t, trajectories: trajectories, signals: analysis.signals)
+                for c in candidates {
+                    let tr = c.trajectory
+                    print(String(format: "  %6.2f→%6.2f  старт (%.0f,%.0f) → конец (%.0f,%.0f)  кисть (%.0f,%.0f)  прилёт %.2f  издалека %.2f  точек %d",
+                        tr.start, tr.end, tr.first!.x, tr.first!.y, tr.last!.x, tr.last!.y, c.wrist.x, c.wrist.y, c.arrival, c.approach, tr.points.count))
+                }
+            }
+        }
 
         print("\n=== РАКУРС ===")
         print(analysis.cameraView.title)
@@ -70,27 +93,17 @@ struct Runner {
         print("\n=== УДАРЫ: \(analysis.strokes.count) ===")
         for stroke in analysis.strokes {
             let speed = String(format: "%.2f", stroke.value(.peakWristSpeed))
-            let elbow = String(format: "%.0f", stroke.value(.elbowAtContact))
             let type = stroke.type.title.padding(toLength: 16, withPad: " ", startingAt: 0)
-            let lead = StrokeClassifier.shoulderLead(
-                phases: stroke.phases, frames: track.frames,
-                signals: analysis.signals, handedness: hand
-            )
-            let leadText = lead.map { String(format: "%+.2f", $0) } ?? "  -  "
-            let overhead = StrokeClassifier.overheadMargin(
-                phases: stroke.phases, frames: track.frames,
-                signals: analysis.signals, handedness: hand
-            )
-            let overheadText = overhead.map { String(format: "%+.2f", $0) } ?? "  -  "
-            let backswing = stroke.value(.backswingDuration)
-            let backswingText = backswing.isFinite ? String(format: "%.2f", backswing) : "нет"
             let shape = stroke.shape
             let shapeText = String(
                 format: "сдвиг %.2f  путь %.2f  прям %.2f  провод %.2f  выступ %.1f",
                 shape.forwardDisplacement, shape.forwardPath, shape.straightness,
                 shape.followThrough, shape.prominence
             )
-            print("#\(stroke.id + 1)\t\(String(format: "%6.2f", stroke.contactTime)) с\t\(type)\tскор \(speed)\t\(shapeText)")
+            let ball = stroke.ballContact.map { String(format: "мяч %.2f", $0.time) } ?? "мяч  --- "
+            let height = String(format: "выс %+.2f", stroke.value(.contactHeight))
+            let verdict = stroke.isDoubtful ? "✗ " + stroke.doubts.map(\.rawValue).joined(separator: ",") : "✓"
+            print("#\(stroke.id + 1)\t\(String(format: "%6.2f", stroke.contactTime)) с\t\(ball)\t\(type)\tскор \(speed)\t\(height)\t\(shapeText)\t\(verdict)")
         }
 
         print("\n=== РАЗБРОС ПО ТИПАМ УДАРА ===")
