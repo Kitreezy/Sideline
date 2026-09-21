@@ -16,7 +16,7 @@ for runtime in sorted(devices, reverse=True):
             print(device["udid"])
             sys.exit(0)
 sys.exit(1)
-')}"
+' || true)}"
 
 if [ -z "$UDID" ]; then
     echo "Нет ни одного доступного симулятора iPhone."
