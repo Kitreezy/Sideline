@@ -50,10 +50,28 @@ final class AnalysisStore {
     var state: State = .idle
     var handedness: Handedness = .right
 
+    /// Сохранённые тренировки и незаконченный разбор — для главного экрана.
+    private(set) var savedSessions: [SavedSession] = []
+    private(set) var pending: (info: PendingAnalysis, videoURL: URL)?
+    /// Какая сессия сейчас открыта — чтобы обновлять её счётчики в списке.
+    private var currentSession: SavedSession?
+
     private var currentJob: Task<Void, Never>?
     private var copyObservation: NSKeyValueObservation?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private let overrides = StrokeOverrideStore()
+    private let sessions = SessionStore()
+
+    init() {
+        reloadSessions()
+    }
+
+    func reloadSessions() {
+        savedSessions = sessions.list()
+        pending = sessions.pending()
+    }
+
+    var storageBytes: Int64 { sessions.totalBytes() }
 
     /// Оценка оставшегося времени по замеренной скорости текущей стадии.
     private var stageStarted: Date?
@@ -98,7 +116,37 @@ final class AnalysisStore {
         state = .working(Work(stage: .extracting(.opening), fraction: 0, remaining: nil))
         keepAlive(true)
 
+        // Видео сразу перекладывается к нам: если приложение убьют в фоне,
+        // копирование из галереи — самое долгое — повторять не придётся.
         let hand = handedness
+        let ownedURL: URL
+        do {
+            ownedURL = try sessions.beginPending(videoURL: url, handedness: hand)
+            pending = sessions.pending()
+        } catch {
+            state = .failed(error.localizedDescription)
+            keepAlive(false)
+            return
+        }
+
+        run(videoURL: ownedURL, handedness: hand)
+    }
+
+    /// Незаконченный разбор с прошлого запуска: видео уже у нас.
+    func resumePending() {
+        guard let pending else { return }
+        handedness = pending.info.handedness
+        state = .working(Work(stage: .extracting(.opening), fraction: 0, remaining: nil))
+        keepAlive(true)
+        run(videoURL: pending.videoURL, handedness: pending.info.handedness)
+    }
+
+    func discardPending() {
+        sessions.clearPending()
+        pending = nil
+    }
+
+    private func run(videoURL url: URL, handedness hand: Handedness) {
         currentJob = Task {
             defer { keepAlive(false) }
             do {
@@ -114,13 +162,51 @@ final class AnalysisStore {
                 try Task.checkCancellation()
 
                 self.overrides.apply(to: &analysis)
-                self.state = .ready(analysis, videoURL: url)
+
+                // Сохраняем до показа: результат не должен зависеть от того,
+                // дождётся ли пользователь экрана.
+                let saved = try self.sessions.save(
+                    track: track, analysis: analysis, handedness: hand, videoURL: url
+                )
+                self.sessions.clearPending()
+                self.currentSession = saved.session
+                self.reloadSessions()
+                self.state = .ready(analysis, videoURL: saved.videoURL)
             } catch is CancellationError {
                 // Пользователь ушёл — молча выходим.
             } catch {
                 self.state = .failed(error.localizedDescription)
             }
         }
+    }
+
+    // MARK: - Сохранённые сессии
+
+    /// Открыть сохранённую тренировку. Vision не запускается: дорожка
+    /// с диска, удары и выводы считаются заново — это миллисекунды,
+    /// и старые сессии получают все улучшения анализатора.
+    func open(_ session: SavedSession) {
+        currentJob?.cancel()
+        state = .working(Work(stage: .computing, fraction: 1, remaining: nil))
+        do {
+            let loaded = try sessions.load(session)
+            var analysis = StrokeAnalyzer().analyze(track: loaded.track, handedness: session.handedness)
+            overrides.apply(to: &analysis)
+            handedness = session.handedness
+            currentSession = session
+            state = .ready(analysis, videoURL: loaded.videoURL)
+        } catch {
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    func delete(_ session: SavedSession) {
+        sessions.delete(session)
+        if currentSession?.id == session.id {
+            currentSession = nil
+            state = .idle
+        }
+        reloadSessions()
     }
 
     /// Пользователь решил, удар это или нет. Статистика пересчитывается
@@ -130,14 +216,24 @@ final class AnalysisStore {
         analysis.setRejected(rejected, for: stroke)
         overrides.remember(rejected: rejected, for: stroke, in: analysis)
         state = .ready(analysis, videoURL: url)
+        if let currentSession {
+            sessions.refreshCounts(for: currentSession, from: analysis)
+            reloadSessions()
+        }
     }
 
     func reset() {
+        let wasWorking: Bool
+        if case .working = state { wasWorking = true } else { wasWorking = false }
         currentJob?.cancel()
         currentJob = nil
         copyObservation = nil
         keepAlive(false)
+        // Отменил сам — значит, продолжать не захочет.
+        if wasWorking { discardPending() }
+        currentSession = nil
         state = .idle
+        reloadSessions()
     }
 
     // MARK: - Прогресс и оценка времени

@@ -8,7 +8,7 @@ struct RootView: View {
     var body: some View {
         NavigationStack {
             content
-                .navigationTitle("Разбор удара")
+                .navigationTitle("Sideline")
                 .navigationBarTitleDisplayMode(.inline)
         }
     }
@@ -39,8 +39,8 @@ struct ImportScreen: View {
     @State private var loadError: String?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+        List {
+            Section {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Сними серию ударов и посмотри, что у тебя гуляет от удара к удару.")
                         .font(.title3.weight(.medium))
@@ -48,16 +48,14 @@ struct ImportScreen: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                .padding(.vertical, 4)
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Бьющая рука").font(.headline)
-                    Picker("Бьющая рука", selection: $store.handedness) {
-                        ForEach(Handedness.allCases, id: \.self) { hand in
-                            Text(hand.title).tag(hand)
-                        }
+                Picker("Бьющая рука", selection: $store.handedness) {
+                    ForEach(Handedness.allCases, id: \.self) { hand in
+                        Text(hand.title).tag(hand)
                     }
-                    .pickerStyle(.segmented)
                 }
+                .pickerStyle(.segmented)
 
                 PhotosPicker(selection: $pickerItem, matching: .videos) {
                     Label("Выбрать видео", systemImage: "video.badge.waveform")
@@ -67,50 +65,117 @@ struct ImportScreen: View {
                 .buttonStyle(.borderedProminent)
 
                 if let loadError {
-                    Text(loadError)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
+                    Text(loadError).font(.footnote).foregroundStyle(.red)
                 }
+            }
 
-                ShootingTips()
+            if let pending = store.pending {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Разбор не был закончен", systemImage: "exclamationmark.triangle")
+                            .font(.subheadline.weight(.medium))
+                        Text("Видео от \(pending.info.startedAt.formatted(date: .abbreviated, time: .shortened)) уже скопировано, осталось разобрать.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Продолжить") { store.resumePending() }
+                                .buttonStyle(.borderedProminent)
+                            Button("Удалить", role: .destructive) { store.discardPending() }
+                                .buttonStyle(.bordered)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
 
+            if !store.savedSessions.isEmpty {
+                Section {
+                    ForEach(store.savedSessions) { session in
+                        Button { store.open(session) } label: {
+                            SessionRow(session: session)
+                        }
+                        .foregroundStyle(.primary)
+                    }
+                    .onDelete { offsets in
+                        for index in offsets { store.delete(store.savedSessions[index]) }
+                    }
+                } header: {
+                    Text("Тренировки")
+                } footer: {
+                    Text("Видео занимают \(ByteCountFormatter.string(fromByteCount: store.storageBytes, countStyle: .file)). Смахни влево, чтобы удалить вместе с видео.")
+                }
+            }
+
+            Section {
                 NavigationLink {
                     FramingScreen()
                 } label: {
                     Label("Проверить кадр перед съёмкой", systemImage: "viewfinder")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 4)
                 }
-                .buttonStyle(.bordered)
-
                 NavigationLink {
                     CameraProbeScreen()
                 } label: {
                     Label("Что тянет камера этого телефона", systemImage: "gauge.with.needle")
-                        .font(.footnote)
                 }
             }
-            .padding()
+
+            Section("Как снимать") {
+                ShootingTips()
+            }
         }
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }
             loadError = nil
             store.analyze(item: item)
+            pickerItem = nil
         }
+        .onAppear { store.reloadSessions() }
+    }
+}
+
+private struct SessionRow: View {
+    let session: SavedSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(session.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                Text(Format.strokeCount(session.strokeCount))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 6) {
+                Text(breakdown)
+                Text("·")
+                Text(String(format: "%.0f с", session.duration))
+                Text("·")
+                Text(session.cameraView.title.lowercased())
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var breakdown: String {
+        let parts = StrokeType.allCases.compactMap { type -> String? in
+            guard let count = session.typeCounts[type.rawValue], count > 0 else { return nil }
+            return "\(type.title.lowercased()) \(count)"
+        }
+        return parts.isEmpty ? "ударов нет" : parts.joined(separator: ", ")
     }
 }
 
 private struct ShootingTips: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Как снимать").font(.headline)
             tip("Камеру сбоку, примерно на высоте пояса, игрок целиком в кадре.")
             tip("Слоу-мо 120 или 240 fps. На обычных 30 fps момент контакта размазывается на треть кадра.")
             tip("15–20 ударов подряд. На пяти разброс ещё ничего не значит.")
             tip("Телефон неподвижно — на треноге или на сумке. Дрожь руки уедет в цифры.")
         }
-        .padding()
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func tip(_ text: String) -> some View {

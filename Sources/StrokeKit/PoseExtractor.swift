@@ -25,7 +25,7 @@ public enum PoseExtractionError: Error, LocalizedError {
 /// остаются только окна ударов, и медиана по ним — это уже не фон,
 /// а сами удары. Поэтому фон замеряется на первом проходе, по всей записи,
 /// и передаётся дальше отдельно.
-public struct BackgroundMotion: Sendable {
+public struct BackgroundMotion: Sendable, Codable {
     public let leftWristSpeedMedian: Double
     public let rightWristSpeedMedian: Double
 
@@ -39,7 +39,9 @@ public struct BackgroundMotion: Sendable {
     }
 }
 
-public struct PoseTrack: Sendable {
+/// Codable — это то, что кэшируется между запусками: Vision стоит минуты,
+/// а всё, что считается из дорожки, — миллисекунды и пересчитывается заново.
+public struct PoseTrack: Sendable, Codable {
     public let frames: [PoseFrame]
     /// Размер кадра после применения ориентации съёмки — в этих координатах лежат точки.
     public let displaySize: CGSize
