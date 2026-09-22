@@ -82,6 +82,20 @@ public enum MetricKey: String, CaseIterable, Sendable, Codable {
         default: return 0
         }
     }
+
+    /// Значение с нужным числом знаков. NaN — обычное дело: длительность
+    /// замаха считается не у каждого удара.
+    public func format(_ value: Double) -> String {
+        guard value.isFinite else { return "—" }
+        return String(format: "%.\(fractionDigits)f", value)
+    }
+
+    /// То же с единицей. Градус пишется вплотную к числу — «126 °»
+    /// читается как опечатка.
+    public func formatWithUnit(_ value: Double) -> String {
+        guard value.isFinite else { return "—" }
+        return unit == "°" ? "\(format(value))\(unit)" : "\(format(value)) \(unit)"
+    }
 }
 
 /// Сводка по одной метрике на всей серии ударов.
@@ -90,8 +104,16 @@ public struct MetricSummary: Sendable, Identifiable {
     public let values: [Double]
     public let mean: Double
     public let standardDeviation: Double
+    /// Сколько ударов дали значение. Замах измеряется не у каждого удара,
+    /// и разброс по одному значению — ноль, а не стабильность.
+    public let finiteCount: Int
 
     public var id: MetricKey { key }
+
+    /// Достаточно ли значений, чтобы разброс что-то значил.
+    public func isWellSampled(of total: Int) -> Bool {
+        finiteCount >= 3 && finiteCount * 2 >= total
+    }
 
     /// Разброс относительно порога заметности. >1 — стоит обратить внимание.
     public var instability: Double {
@@ -113,6 +135,7 @@ public struct MetricSummary: Sendable, Identifiable {
         self.key = key
         let clean = values.filter { $0.isFinite }
         self.values = values
+        self.finiteCount = clean.count
         guard !clean.isEmpty else {
             self.mean = .nan
             self.standardDeviation = .nan

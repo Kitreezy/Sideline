@@ -3,13 +3,11 @@ import StrokeKit
 
 enum Format {
     static func value(_ value: Double, key: MetricKey) -> String {
-        guard value.isFinite else { return "—" }
-        return String(format: "%.\(key.fractionDigits)f", value)
+        key.format(value)
     }
 
     static func valueWithUnit(_ value: Double, key: MetricKey) -> String {
-        guard value.isFinite else { return "—" }
-        return "\(self.value(value, key: key)) \(key.unit)"
+        key.formatWithUnit(value)
     }
 
     static func time(_ seconds: TimeInterval) -> String {

@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct TennisFormApp: App {
+struct SidelineApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()

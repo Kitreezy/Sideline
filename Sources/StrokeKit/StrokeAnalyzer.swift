@@ -13,7 +13,19 @@ public struct AnalyzedSignals: Sendable {
     public let wristY: Signal
     public let hipX: Signal            // центр таза со стороны бьющей руки
     public let hipY: Signal
-    public let torsoScale: Double      // пикселей в одной «длине корпуса»
+    /// Медианная длина корпуса за всё видео — запасной масштаб.
+    public let torsoScale: Double
+    /// Длина корпуса в каждом кадре. Игрок ходит по корту и подходит
+    /// к камере — его размер в кадре меняется втрое, и одна медиана на всё
+    /// видео превращает шаг у камеры в «удар».
+    public let torsoScaleSeries: Signal
+
+    /// Масштаб в конкретном кадре, с запасным значением там, где корпус не виден.
+    public func scale(at index: Int) -> Double {
+        guard index >= 0, index < torsoScaleSeries.count else { return torsoScale }
+        let value = torsoScaleSeries.values[index]
+        return value.isFinite && value > 1 ? value : torsoScale
+    }
     /// Индексы, перед которыми скелет разрывается: склейка в ролике,
     /// потеря трекинга или перескок Vision на другого человека в кадре.
     public let cutIndices: Set<Int>
@@ -37,11 +49,74 @@ public struct StrokePhases: Sendable {
     /// не считается: ноль здесь означал бы «замаха не было», а на деле
     /// это «мы его не увидели».
     public let hasBackswing: Bool
+
+    /// Тот же удар, но с контактом, измеренным по мячу. Фазы до и после
+    /// подтягиваются так, чтобы порядок не нарушился.
+    func replacingContact(with index: Int) -> StrokePhases {
+        let contact = max(start + 1, min(end - 1, index))
+        return StrokePhases(
+            start: start,
+            transition: min(transition, contact - 1),
+            contact: contact,
+            end: end,
+            hasBackswing: hasBackswing && transition < contact
+        )
+    }
+}
+
+/// Геометрия движения кисти в окне удара. По этим признакам отличается
+/// удар от всего остального, что тоже разгоняет кисть: сплит-степа,
+/// подбора мяча, перехвата ракетки, дрожания трекинга.
+public struct StrokeShape: Sendable {
+    /// Смещение кисти от конца замаха до контакта, в длинах корпуса.
+    public let forwardDisplacement: Double
+    /// Длина пути кисти за тот же интервал. Больше смещения, если кисть
+    /// петляла: у настоящего разгона путь и смещение почти совпадают.
+    public let forwardPath: Double
+    /// Смещение от контакта до конца окна — проводка.
+    public let followThrough: Double
+    /// Во сколько раз пик выше скорости на границах окна.
+    public let prominence: Double
+    public let hasBackswing: Bool
+
+    /// Насколько прямо шла кисть: 1 — по прямой, 0 — вернулась туда же.
+    public var straightness: Double {
+        forwardPath > 1e-9 ? forwardDisplacement / forwardPath : 0
+    }
+}
+
+/// Почему всплеск скорости кисти может оказаться не ударом.
+public enum StrokeDoubt: String, Sendable, Codable, CaseIterable {
+    /// Кисть почти не сдвинулась: сплит-степ, перехват ракетки, подбор мяча.
+    case tinySwing
+    /// Кисть петляла вместо разгона по дуге — похоже на дрожание трекинга.
+    case wandering
+    /// Пик едва выше фона: рука просто болталась при ходьбе.
+    case noBurst
+    /// Скелет в момент удара потерялся — форму движения не измерить.
+    case lostTracking
+    /// Мяч отслеживался на этой записи, но к этому взмаху не прилетал.
+    case noBall
+
+    public var title: String {
+        switch self {
+        case .tinySwing: return "Кисть почти не сдвинулась"
+        case .wandering: return "Движение петляло"
+        case .noBurst: return "Нет выраженного всплеска"
+        case .lostTracking: return "Скелет терялся в момент удара"
+        case .noBall: return "Мяч у ракетки не пойман — проверь по кадру"
+        }
+    }
 }
 
 public struct Stroke: Sendable, Identifiable {
     public let id: Int
     public let type: StrokeType
+    public let shape: StrokeShape
+    /// Автоматические сомнения. Пусто — похоже на настоящий удар.
+    public let doubts: [StrokeDoubt]
+    /// Мяч, оборвавшийся у кисти. Если есть — контакт измерен, а не оценён.
+    public let ballContact: BallContact?
     public let phases: StrokePhases
     public let startTime: TimeInterval
     public let contactTime: TimeInterval
@@ -49,6 +124,8 @@ public struct Stroke: Sendable, Identifiable {
     public let values: [MetricKey: Double]
 
     public func value(_ key: MetricKey) -> Double { values[key] ?? .nan }
+
+    public var isDoubtful: Bool { !doubts.isEmpty }
 }
 
 public struct AnalysisWarning: Sendable, Identifiable {
@@ -63,15 +140,79 @@ public struct SessionAnalysis: Sendable {
     public let signals: AnalyzedSignals
     public let strokes: [Stroke]
     public let warnings: [AnalysisWarning]
+    /// Шум измерения на этой записи — по тихим отрезкам, где игрок стоит.
+    public let noise: NoiseFloor
+
+    /// Удары, которые в статистику не идут. Начинается с автоматических
+    /// сомнений; пользователь может вернуть удар или, наоборот, выкинуть —
+    /// он видит запись, ему виднее.
+    public var rejectedIDs: Set<Int>
+
+    public init(
+        track: PoseTrack,
+        handedness: Handedness,
+        cameraView: CameraView,
+        signals: AnalyzedSignals,
+        strokes: [Stroke],
+        warnings: [AnalysisWarning],
+        noise: NoiseFloor = .unknown
+    ) {
+        self.track = track
+        self.handedness = handedness
+        self.cameraView = cameraView
+        self.signals = signals
+        self.strokes = strokes
+        self.warnings = warnings
+        self.noise = noise
+        self.rejectedIDs = Set(strokes.filter(\.isDoubtful).map(\.id))
+    }
+
+    /// Метрика считается, если её видно в этом ракурсе и шум ниже порога
+    /// заметности. Иначе честнее не показывать число вовсе.
+    public func isMeasurable(_ key: MetricKey) -> Bool {
+        key.isReliable(in: cameraView) && noise.isMeasurable(key)
+    }
+
+    /// Почему метрика не считается — ракурс или шум.
+    public func unmeasurableReason(_ key: MetricKey) -> String? {
+        if let reason = key.unreliabilityReason(in: cameraView) { return reason }
+        guard let level = noise.noise(for: key), !noise.isMeasurable(key) else { return nil }
+        let digits = key.fractionDigits
+        return String(
+            format: "Шум измерения ±%.\(digits)f %@ при пороге заметности ±%.\(digits)f: игрок в кадре слишком мелкий, чтобы это мерить.",
+            level, key.unit, key.noticeableSpread
+        )
+    }
+
+    public var acceptedStrokes: [Stroke] {
+        strokes.filter { !rejectedIDs.contains($0.id) }
+    }
+
+    /// Ударов, у которых контакт измерен по мячу, а не оценён по кисти.
+    public var ballConfirmedCount: Int {
+        strokes.filter { $0.ballContact != nil }.count
+    }
+
+    public var rejectedStrokes: [Stroke] {
+        strokes.filter { rejectedIDs.contains($0.id) }
+    }
+
+    public func isRejected(_ stroke: Stroke) -> Bool {
+        rejectedIDs.contains(stroke.id)
+    }
+
+    public mutating func setRejected(_ rejected: Bool, for stroke: Stroke) {
+        if rejected { rejectedIDs.insert(stroke.id) } else { rejectedIDs.remove(stroke.id) }
+    }
 
     public func strokes(of type: StrokeType) -> [Stroke] {
-        strokes.filter { $0.type == type }
+        acceptedStrokes.filter { $0.type == type }
     }
 
     /// Типы ударов, которые реально нашлись, от самого частого к редкому.
     public var presentTypes: [StrokeType] {
         var counts: [StrokeType: Int] = [:]
-        for stroke in strokes { counts[stroke.type, default: 0] += 1 }
+        for stroke in acceptedStrokes { counts[stroke.type, default: 0] += 1 }
         return counts.sorted { $0.value > $1.value }.map(\.key)
     }
 
@@ -84,19 +225,26 @@ public struct SessionAnalysis: Sendable {
         }
     }
 
-    /// От самой «гуляющей» метрики к стабильной. Метрики, которые в этом
-    /// ракурсе не работают, сюда не попадают вовсе.
+    /// От самой «гуляющей» метрики к стабильной. Метрики, которые здесь
+    /// не измеримы — по ракурсу или по шуму, — сюда не попадают вовсе.
+    /// Нестабильность считается относительно порога с поправкой на шум.
     public func ranked(of type: StrokeType) -> [MetricSummary] {
         summaries(of: type)
-            .filter { $0.key.isReliable(in: cameraView) }
+            .filter { isMeasurable($0.key) }
             .filter { $0.standardDeviation.isFinite && $0.mean.isFinite }
-            .sorted { $0.instability > $1.instability }
+            .sorted { instability(of: $0) > instability(of: $1) }
     }
 
-    /// Метрики, выключенные из-за ракурса — их надо показать отдельно,
-    /// иначе непонятно, куда они делись.
+    /// Разброс относительно порога, поднятого до двух шумов.
+    public func instability(of summary: MetricSummary) -> Double {
+        let threshold = noise.effectiveSpread(for: summary.key)
+        return threshold > 0 ? summary.standardDeviation / threshold : 0
+    }
+
+    /// Метрики, выключенные из-за ракурса или шума — их надо показать
+    /// отдельно, иначе непонятно, куда они делись.
     public var disabledMetrics: [MetricKey] {
-        MetricKey.allCases.filter { !$0.isReliable(in: cameraView) }
+        MetricKey.allCases.filter { !isMeasurable($0) }
     }
 }
 
@@ -104,8 +252,10 @@ public struct StrokeAnalyzer: Sendable {
     public struct Tuning: Sendable {
         /// Ниже этой скорости кисти это не удар, а подготовка.
         public var minPeakSpeed: Double = 2.0
-        /// Два удара не могут идти подряд быстрее, чем раз в столько секунд.
-        public var minStrokeSeparation: TimeInterval = 0.6
+        /// Два удара одного игрока не могут идти подряд быстрее: мяч должен
+        /// слетать на ту сторону и вернуться. На живой записи при 0.6 с один
+        /// бэкхенд засчитывался дважды — контакт и проводка.
+        public var minStrokeSeparation: TimeInterval = 1.0
         /// Границы удара — там, где скорость упала до этой доли от пика.
         public var boundaryFraction: Double = 0.25
         public var maxBackswing: TimeInterval = 1.2
@@ -126,6 +276,17 @@ public struct StrokeAnalyzer: Sendable {
         /// где скорость по построению равна доле от пика.
         public var backswingDipShare: Double = 0.7
 
+        // Отсев не-ударов. Пороги выставлены из геометрии: рука за разгон
+        // проходит от корпуса до вытянутого положения — это заведомо больше
+        // половины длины корпуса даже при съёмке сзади. Проверить на живой
+        // записи ещё предстоит; они вынесены сюда именно поэтому.
+        /// Минимальное смещение кисти от конца замаха до контакта, в корпусах.
+        public var minForwardDisplacement: Double = 0.5
+        /// Минимальная прямизна пути: полукруг даёт 0.64, дрожание — около нуля.
+        public var minStraightness: Double = 0.45
+        /// Пик должен быть хотя бы во столько раз выше скорости на краях окна.
+        public var minProminence: Double = 2.0
+
         public init() {}
     }
 
@@ -135,7 +296,11 @@ public struct StrokeAnalyzer: Sendable {
         self.tuning = tuning
     }
 
-    public func analyze(track: PoseTrack, handedness: Handedness) -> SessionAnalysis {
+    public func analyze(
+        track: PoseTrack,
+        handedness: Handedness,
+        ballTrajectories: [BallTrajectory]? = nil
+    ) -> SessionAnalysis {
         let signals = Self.buildSignals(track: track, handedness: handedness)
         let threshold = Self.strokeThreshold(
             signals.wristSpeed,
@@ -151,7 +316,26 @@ public struct StrokeAnalyzer: Sendable {
 
         var strokes: [Stroke] = []
         for (order, peak) in peaks.enumerated() {
-            guard let phases = phases(around: peak, signals: signals) else { continue }
+            guard let swing = phases(around: peak, signals: signals) else { continue }
+
+            // Форма движения описывает сам взмах — она считается по пику скорости,
+            // независимо от того, где потом окажется контакт.
+            let shape = Self.shape(of: swing, signals: signals)
+
+            // Мяч, оборвавшийся у кисти, даёт контакт точнее пика скорости:
+            // на шумном скелете пик легко приходится на проводку.
+            var phases = swing
+            var ballContact: BallContact?
+            if let ballTrajectories {
+                ballContact = BallContactMatcher.contact(
+                    near: signals.times[peak], trajectories: ballTrajectories, signals: signals
+                )
+                if let contact = ballContact,
+                   let index = Self.frameIndex(nearest: contact.time, in: signals.times) {
+                    phases = phases.replacingContact(with: index)
+                }
+            }
+
             let values = Self.metrics(for: phases, signals: signals, handedness: handedness)
             let type = StrokeClassifier.classify(
                 phases: phases,
@@ -159,10 +343,16 @@ public struct StrokeAnalyzer: Sendable {
                 signals: signals,
                 handedness: handedness
             )
+            // Прилетевший издалека и оборвавшийся у кисти мяч — это и есть удар.
+            // Эвристики по форме против такого свидетельства не аргумент.
+            let doubts = ballContact != nil ? [] : doubts(about: shape)
             strokes.append(
                 Stroke(
                     id: order,
                     type: type,
+                    shape: shape,
+                    doubts: doubts,
+                    ballContact: ballContact,
                     phases: phases,
                     startTime: signals.times[phases.start],
                     contactTime: signals.times[phases.contact],
@@ -172,7 +362,12 @@ public struct StrokeAnalyzer: Sendable {
             )
         }
 
+        if ballTrajectories != nil {
+            strokes = Self.applyingBallVerdict(to: strokes)
+        }
+
         let cameraView = CameraViewDetector.detect(frames: track.frames)
+        let noise = NoiseEstimator.estimate(signals: signals, frameRate: track.frameRate)
 
         return SessionAnalysis(
             track: track,
@@ -183,9 +378,11 @@ public struct StrokeAnalyzer: Sendable {
             warnings: Self.warnings(
                 track: track,
                 signals: signals,
-                strokeCount: strokes.count,
-                cameraView: cameraView
-            )
+                strokeCount: strokes.filter { !$0.isDoubtful }.count,
+                cameraView: cameraView,
+                noise: noise
+            ),
+            noise: noise
         )
     }
 
@@ -209,7 +406,7 @@ public struct StrokeAnalyzer: Sendable {
 
     // MARK: - Ряды
 
-    static func buildSignals(track: PoseTrack, handedness: Handedness) -> AnalyzedSignals {
+    public static func buildSignals(track: PoseTrack, handedness: Handedness) -> AnalyzedSignals {
         let frames = track.frames
         let times = frames.map(\.time)
         let scale = torsoScale(frames: frames, fallbackHeight: track.displaySize.height)
@@ -226,6 +423,23 @@ public struct StrokeAnalyzer: Sendable {
             }
         }
 
+        // Размер игрока меняется медленно — сглаживаем сильно, чтобы замах
+        // (шея и таз чуть расходятся) не читался как приближение к камере.
+        let scaleSeries = SignalProcessing.perSegment(
+            Signal(times: times, values: frames.map { frame in
+                guard let neck = frame.point(.neck, minConfidence: 0.5),
+                      let root = frame.point(.root, minConfidence: 0.5) else { return .nan }
+                let length = Geometry.distance(neck, root)
+                return length > 1 ? length : .nan
+            }),
+            boundaries: cuts
+        ) { SignalProcessing.smooth(SignalProcessing.interpolateGaps($0, maxGapSeconds: 1.0), sigmaSeconds: 0.5) }
+
+        func scaleAt(_ index: Int) -> Double {
+            let value = scaleSeries.values[index]
+            return value.isFinite && value > 1 ? value : scale
+        }
+
         let wristX = series { frame in
             frame.point(handedness.wrist).map { Double($0.x) } ?? .nan
         }
@@ -239,7 +453,7 @@ public struct StrokeAnalyzer: Sendable {
         for i in 0..<times.count {
             let a = vx.values[i], b = vy.values[i]
             guard !a.isNaN, !b.isNaN else { continue }
-            speedValues[i] = (a * a + b * b).squareRoot() / scale
+            speedValues[i] = (a * a + b * b).squareRoot() / scaleAt(i)
         }
         let wristSpeed = SignalProcessing.perSegment(
             Signal(times: times, values: speedValues),
@@ -291,6 +505,7 @@ public struct StrokeAnalyzer: Sendable {
             hipX: hipX,
             hipY: hipY,
             torsoScale: scale,
+            torsoScaleSeries: scaleSeries,
             cutIndices: cuts
         )
     }
@@ -302,35 +517,55 @@ public struct StrokeAnalyzer: Sendable {
         var cuts: Set<Int> = []
         guard frames.count > 1, scale > 0 else { return cuts }
 
-        for index in 1..<frames.count {
-            let previous = frames[index - 1]
-            let current = frames[index]
+        // Сравниваем не соседние кадры, а медианы по нескольким кадрам до
+        // и после: настоящая склейка или перескок на другого человека меняют
+        // положение и размер устойчиво, а дрожание трекинга — на один кадр.
+        // На мелком игроке дрожание в 20 px давало сотни ложных разрывов
+        // и дробило разбор на обрывки.
+        let window = 4
+        let necks = frames.map { $0.point(.neck) }
+        let torsos = frames.map { frame -> Double? in
+            guard let neck = frame.point(.neck), let root = frame.point(.root) else { return nil }
+            let length = Geometry.distance(neck, root)
+            return length > 1 ? length : nil
+        }
 
-            let hadSkeleton = previous.joints.count >= 8
-            let hasSkeleton = current.joints.count >= 8
+        func median(_ values: [Double]) -> Double? {
+            guard !values.isEmpty else { return nil }
+            let sorted = values.sorted()
+            return sorted[sorted.count / 2]
+        }
+        func medianPoint(_ range: Range<Int>) -> CGPoint? {
+            let points = range.compactMap { necks[$0] }
+            guard points.count >= 2,
+                  let x = median(points.map { Double($0.x) }),
+                  let y = median(points.map { Double($0.y) }) else { return nil }
+            return CGPoint(x: x, y: y)
+        }
+        func medianTorso(_ range: Range<Int>) -> Double? {
+            let values = range.compactMap { torsos[$0] }
+            return values.count >= 2 ? median(values) : nil
+        }
+
+        for index in 1..<frames.count {
+            let hadSkeleton = frames[index - 1].joints.count >= 8
+            let hasSkeleton = frames[index].joints.count >= 8
             if hadSkeleton != hasSkeleton {
                 cuts.insert(index)
                 continue
             }
 
-            // Прыжок опорных точек.
-            for joint in [BodyJoint.neck, .root] {
-                guard let a = previous.point(joint), let b = current.point(joint) else { continue }
-                if Geometry.distance(a, b) / scale > threshold {
-                    cuts.insert(index)
-                    break
-                }
-            }
-            if cuts.contains(index) { continue }
+            let before = max(0, index - window)..<index
+            let after = index..<min(frames.count, index + window)
+            guard let neckBefore = medianPoint(before), let neckAfter = medianPoint(after) else { continue }
 
-            // Резкая смена масштаба человека — верный признак смены плана.
-            if let neckA = previous.point(.neck), let rootA = previous.point(.root),
-               let neckB = current.point(.neck), let rootB = current.point(.root) {
-                let before = Geometry.distance(neckA, rootA)
-                let after = Geometry.distance(neckB, rootB)
-                if before > 1, after > 1, max(before, after) / min(before, after) > 1.3 {
-                    cuts.insert(index)
-                }
+            if Geometry.distance(neckBefore, neckAfter) / scale > threshold {
+                cuts.insert(index)
+                continue
+            }
+            if let torsoBefore = medianTorso(before), let torsoAfter = medianTorso(after),
+               max(torsoBefore, torsoAfter) / min(torsoBefore, torsoAfter) > 1.3 {
+                cuts.insert(index)
             }
         }
         return cuts
@@ -486,6 +721,104 @@ public struct StrokeAnalyzer: Sendable {
         return index
     }
 
+    static func frameIndex(nearest time: TimeInterval, in times: [TimeInterval]) -> Int? {
+        guard !times.isEmpty else { return nil }
+        var lo = 0, hi = times.count - 1
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if times[mid] < time { lo = mid + 1 } else { hi = mid }
+        }
+        if lo > 0, abs(times[lo - 1] - time) < abs(times[lo] - time) { return lo - 1 }
+        return lo
+    }
+
+    /// Когда мяч на этой записи ловится, взмахи без мяча уходят на проверку,
+    /// а не в статистику: на живой записи по форме движения они почти все
+    /// оказались ложными — стоящий игрок с ракеткой по скелету неотличим
+    /// от бьющего. Кадр контакта в списке делает проверку одним свайпом.
+    /// Когда мяч не пойман ни разу (яркий фон, слишком далеко), «мяча нет»
+    /// ничего не значит, и форма остаётся единственным судьёй.
+    static func applyingBallVerdict(to strokes: [Stroke]) -> [Stroke] {
+        let confirmed = strokes.filter { $0.ballContact != nil }.count
+        guard confirmed >= 5 else { return strokes }
+
+        return strokes.map { stroke in
+            guard stroke.ballContact == nil, !stroke.doubts.contains(.noBall) else { return stroke }
+            return Stroke(
+                id: stroke.id, type: stroke.type, shape: stroke.shape,
+                doubts: stroke.doubts + [.noBall],
+                ballContact: nil, phases: stroke.phases,
+                startTime: stroke.startTime, contactTime: stroke.contactTime, endTime: stroke.endTime,
+                values: stroke.values
+            )
+        }
+    }
+
+    /// Что в форме движения не похоже на удар. Каждая проверка независима,
+    /// чтобы в интерфейсе было видно, за что именно удар попал под сомнение.
+    func doubts(about shape: StrokeShape) -> [StrokeDoubt] {
+        var result: [StrokeDoubt] = []
+        // Смещение не посчиталось — кисти в кадре не было. Ударом это
+        // считать нельзя: не «не удар», а «не знаем», и в статистику не идёт.
+        if !shape.forwardDisplacement.isFinite {
+            return [.lostTracking]
+        }
+        if shape.forwardDisplacement.isFinite, shape.forwardDisplacement < tuning.minForwardDisplacement {
+            result.append(.tinySwing)
+        }
+        if shape.forwardPath > 1e-9, shape.straightness < tuning.minStraightness {
+            result.append(.wandering)
+        }
+        if shape.prominence.isFinite, shape.prominence < tuning.minProminence {
+            result.append(.noBurst)
+        }
+        return result
+    }
+
+    // MARK: - Форма удара
+
+    static func shape(of phases: StrokePhases, signals: AnalyzedSignals) -> StrokeShape {
+        let scale = signals.scale(at: phases.contact)
+
+        func point(_ index: Int) -> (x: Double, y: Double)? {
+            let x = signals.wristX.values[index], y = signals.wristY.values[index]
+            guard x.isFinite, y.isFinite else { return nil }
+            return (x, y)
+        }
+
+        func displacement(_ from: Int, _ to: Int) -> Double {
+            guard let a = point(from), let b = point(to) else { return .nan }
+            return ((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)).squareRoot() / scale
+        }
+
+        func path(_ from: Int, _ to: Int) -> Double {
+            var total = 0.0
+            var previous = point(from)
+            for index in (from + 1)...max(from + 1, to) {
+                guard let current = point(index) else { continue }
+                if let p = previous {
+                    total += ((current.x - p.x) * (current.x - p.x) + (current.y - p.y) * (current.y - p.y)).squareRoot()
+                }
+                previous = current
+            }
+            return total / scale
+        }
+
+        let speed = signals.wristSpeed.values
+        let peak = speed[phases.contact]
+        let edges = [speed[phases.start], speed[phases.end]].filter { $0.isFinite }
+        let edge = edges.max() ?? 0
+        let prominence = peak.isFinite && edge > 1e-9 ? peak / edge : .nan
+
+        return StrokeShape(
+            forwardDisplacement: displacement(phases.transition, phases.contact),
+            forwardPath: path(phases.transition, phases.contact),
+            followThrough: displacement(phases.contact, phases.end),
+            prominence: prominence,
+            hasBackswing: phases.hasBackswing
+        )
+    }
+
     // MARK: - Метрики удара
 
     static func metrics(
@@ -496,7 +829,7 @@ public struct StrokeAnalyzer: Sendable {
         var values: [MetricKey: Double] = [:]
         let contact = phases.contact
 
-        values[.peakWristSpeed] = signals.wristSpeed.values[contact]
+        values[.peakWristSpeed] = extremum(signals.wristSpeed, from: phases.start, to: phases.end, pick: Swift.max)
         values[.elbowAtContact] = signals.elbowAngle.values[contact]
 
         values[.shoulderRotationRange] = spread(signals.shoulderAngle, from: phases.start, to: phases.end)
@@ -524,9 +857,10 @@ public struct StrokeAnalyzer: Sendable {
         let wristXValue = signals.wristX.values[frameIndex]
         let hipPoint = signals.hipReference(at: frameIndex)
 
+        let contactScale = signals.scale(at: frameIndex)
         if let hipPoint, wristYValue.isFinite {
             // Ось Y растёт вниз, поэтому «выше таза» — это меньшее значение.
-            values[.contactHeight] = (hipPoint.y - wristYValue) / signals.torsoScale
+            values[.contactHeight] = (hipPoint.y - wristYValue) / contactScale
         } else {
             values[.contactHeight] = .nan
         }
@@ -535,7 +869,7 @@ public struct StrokeAnalyzer: Sendable {
             // Знак скорости кисти на контакте задаёт, где для игрока «вперёд».
             let vx = SignalProcessing.derivative(signals.wristX).values[frameIndex]
             let forward: Double = vx.isFinite && vx != 0 ? (vx > 0 ? 1 : -1) : 1
-            values[.contactDepth] = (wristXValue - hipPoint.x) * forward / signals.torsoScale
+            values[.contactDepth] = (wristXValue - hipPoint.x) * forward / contactScale
         } else {
             values[.contactDepth] = .nan
         }
@@ -575,9 +909,17 @@ public struct StrokeAnalyzer: Sendable {
         track: PoseTrack,
         signals: AnalyzedSignals,
         strokeCount: Int,
-        cameraView: CameraView
+        cameraView: CameraView,
+        noise: NoiseFloor = .unknown
     ) -> [AnalysisWarning] {
         var warnings: [AnalysisWarning] = []
+
+        let drowned = MetricKey.allCases.filter { $0.isReliable(in: cameraView) && !noise.isMeasurable($0) }
+        if !drowned.isEmpty {
+            warnings.append(AnalysisWarning(
+                text: "Шум измерения выше порога заметности у метрик: \(drowned.map(\.title).joined(separator: ", ")). На этой записи их не посчитать — игрок в кадре слишком мелкий. Ближе камера — ниже шум."
+            ))
+        }
 
         switch cameraView {
         case .side:
@@ -589,7 +931,7 @@ public struct StrokeAnalyzer: Sendable {
             ))
         case .mixed:
             warnings.append(AnalysisWarning(
-                text: "Ракурс по ходу видео меняется — похоже, это монтаж из разных планов. Метрики, зависящие от ракурса, отключены."
+                text: "Ракурс по ходу записи меняется — игрок ходит по корту и подходит к камере. Метрики, зависящие от ракурса, отключены: для них нужна съёмка сбоку с одной точки."
             ))
         case .unknown:
             warnings.append(AnalysisWarning(
@@ -623,7 +965,7 @@ public struct StrokeAnalyzer: Sendable {
 
         if signals.cutIndices.count > 3 {
             warnings.append(AnalysisWarning(
-                text: "В видео нашлось \(signals.cutIndices.count) мест, где скелет разрывается — это склейки монтажа или потеря трекинга. Такие места из анализа выброшены, но если это смонтированный ролик, а не одна съёмка, цифрам верить нельзя: они смешивают разные ракурсы и разных людей."
+                text: "В \(signals.cutIndices.count) местах скелет пропадает или скачет — игрок выходит из кадра, слишком мелкий или его перекрывают; в нарезке из разных планов так выглядят склейки. Эти места из разбора выброшены."
             ))
         }
 

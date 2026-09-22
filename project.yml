@@ -1,6 +1,6 @@
-name: TennisForm
+name: Sideline
 options:
-  bundleIdPrefix: dev.shiruba.tennisform
+  bundleIdPrefix: dev.shiruba.sideline
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
@@ -26,24 +26,24 @@ targets:
       - Sources/StrokeKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).tennisform.strokekit
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).sideline.strokekit
         GENERATE_INFOPLIST_FILE: YES
         DEFINES_MODULE: YES
 
-  TennisForm:
+  Sideline:
     type: application
     platform: iOS
     sources:
-      - Sources/TennisForm
+      - Sources/Sideline
     dependencies:
       - target: StrokeKit
         embed: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).tennisform
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).sideline
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_CFBundleDisplayName: "Форма"
+        INFOPLIST_KEY_CFBundleDisplayName: "Sideline"
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Нужен доступ к галерее, чтобы разобрать видео твоих ударов. Видео обрабатывается только на устройстве."
         INFOPLIST_KEY_NSCameraUsageDescription: "Камера нужна, чтобы проверить, на какой частоте кадров этот телефон может снимать и одновременно разбирать позу."
         INFOPLIST_KEY_UISupportedInterfaceParameters: ""
@@ -61,10 +61,10 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
 
 schemes:
-  TennisForm:
+  Sideline:
     build:
       targets:
-        TennisForm: all
+        Sideline: all
         StrokeKitTests: [test]
     run:
       config: Debug

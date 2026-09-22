@@ -3,13 +3,39 @@ import StrokeKit
 import SwiftUI
 
 struct StrokeDetailScreen: View {
-    let analysis: SessionAnalysis
-    let stroke: Stroke
-    let videoURL: URL
+    let store: AnalysisStore
+    let strokeID: Int
 
     @State private var frameIndex: Int?
 
+    var body: some View {
+        if let analysis = store.analysis,
+           let videoURL = store.videoURL,
+           let stroke = analysis.strokes.first(where: { $0.id == strokeID }) {
+            StrokeDetailContent(
+                analysis: analysis, stroke: stroke, videoURL: videoURL,
+                frameIndex: $frameIndex,
+                onSetRejected: { rejected in store.setRejected(rejected, for: stroke) }
+            )
+        } else {
+            ContentUnavailableView("Удар не найден", systemImage: "questionmark")
+        }
+    }
+}
+
+/// Само содержимое: получает свежий анализ при каждом изменении в хранилище.
+private struct StrokeDetailContent: View {
+    let analysis: SessionAnalysis
+    let stroke: Stroke
+    let videoURL: URL
+    @Binding var frameIndex: Int?
+    let onSetRejected: (Bool) -> Void
+
     private var currentIndex: Int { frameIndex ?? stroke.phases.contact }
+
+    /// Приближение включено по умолчанию, если игрок в кадре мелкий.
+    @State private var zoomChoice: Bool?
+    private var isZoomed: Bool { zoomChoice ?? PlayerRegion.isPlayerSmall(in: analysis) }
 
     var body: some View {
         ScrollView {
@@ -17,11 +43,26 @@ struct StrokeDetailScreen: View {
                 SkeletonVideoView(
                     videoURL: videoURL,
                     track: analysis.track,
-                    frameIndex: currentIndex
+                    frameIndex: currentIndex,
+                    focus: isZoomed ? PlayerRegion.rect(for: stroke, in: analysis) : nil
                 )
+                .overlay(alignment: .topTrailing) {
+                    Button {
+                        zoomChoice = !isZoomed
+                    } label: {
+                        Label(isZoomed ? "Целиком" : "Крупнее",
+                              systemImage: isZoomed ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                    .padding(10)
+                }
 
                 scrubber
                 phaseBadge
+                verdict
                 metricsGrid
                 charts
             }
@@ -82,11 +123,41 @@ struct StrokeDetailScreen: View {
             Circle().fill(phase.1).frame(width: 8, height: 8)
             Text(phase.0).font(.subheadline.weight(.medium))
             if currentIndex == stroke.phases.contact {
-                Text("оценка по максимуму скорости кисти")
+                Text(stroke.ballContact != nil ? "измерен по мячу" : "оценка по максимуму скорости кисти")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(stroke.ballContact != nil ? .green : .secondary)
             }
         }
+    }
+
+    // MARK: - Удар или нет
+
+    private var verdict: some View {
+        let rejected = analysis.isRejected(stroke)
+        return VStack(alignment: .leading, spacing: 8) {
+            if !stroke.doubts.isEmpty {
+                Label {
+                    Text(stroke.doubts.map(\.title).joined(separator: " · "))
+                        .font(.caption)
+                } icon: {
+                    Image(systemName: "questionmark.circle")
+                }
+                .foregroundStyle(.secondary)
+            }
+            Button {
+                onSetRejected(!rejected)
+            } label: {
+                Label(
+                    rejected ? "Это удар, вернуть в статистику" : "Это не удар",
+                    systemImage: rejected ? "arrow.uturn.backward" : "xmark.circle"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(rejected ? .green : .secondary)
+        }
+        .padding()
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
     }
 
     // MARK: - Цифры удара
@@ -110,7 +181,9 @@ struct StrokeDetailScreen: View {
                     key: key,
                     value: stroke.value(key),
                     sessionMean: summaries.first { $0.key == key }?.mean ?? .nan,
-                    disabledReason: key.unreliabilityReason(in: analysis.cameraView)
+                    band: key.guidance(for: stroke.type).band,
+                    noise: analysis.noise.noise(for: key),
+                    disabledReason: analysis.unmeasurableReason(key)
                 )
             }
         }
@@ -161,6 +234,7 @@ struct StrokeDetailScreen: View {
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
             }
             .frame(height: 160)
+            .chartXScale(domain: stroke.startTime...stroke.endTime)
             .chartXAxisLabel("с")
         }
     }
@@ -170,6 +244,8 @@ private struct MetricRow: View {
     let key: MetricKey
     let value: Double
     let sessionMean: Double
+    let band: ClosedRange<Double>?
+    let noise: Double?
     let disabledReason: String?
 
     @State private var showsHint = false
@@ -217,6 +293,16 @@ private struct MetricRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.trailing, 40)
+                if let band {
+                    Text("Ориентир из тренерской практики: \(Format.value(band.lowerBound, key: key))–\(Format.value(band.upperBound, key: key)) \(key.unit).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let noise {
+                    Text("Шум измерения на этой записи: ±\(Format.value(noise, key: key)) \(key.unit) — разница меньше этого ничего не значит.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.vertical, 2)

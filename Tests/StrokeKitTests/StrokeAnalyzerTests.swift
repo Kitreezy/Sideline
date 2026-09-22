@@ -192,23 +192,39 @@ final class StrokeAnalyzerTests: XCTestCase {
     }
 
     func testCompilationIsCalledOut() {
-        var frames = makeSyntheticTrack().frames
-        for cut in [0.9, 1.3, 2.2, 2.7, 3.4] {
-            let index = Int(cut * 120)
-            guard frames.indices.contains(index) else { continue }
-            frames[index] = PoseFrame(
-                time: frames[index].time,
-                joints: frames[index].joints.mapValues {
-                    JointSample(
-                        point: CGPoint(x: $0.point.x + 900, y: $0.point.y),
-                        confidence: $0.confidence
-                    )
+        // Нарезка: после каждой склейки игрок стоит в другом месте кадра
+        // и остаётся там. Сдвиг на один кадр — это дрожание, а не склейка.
+        let base = makeSyntheticTrack().frames
+        let cutTimes = [0.9, 1.3, 2.2, 2.7, 3.4]
+        let frames = base.map { frame -> PoseFrame in
+            let shifts = cutTimes.filter { frame.time >= $0 }.count
+            let dx = CGFloat(shifts % 2 == 0 ? 0 : 900)
+            return PoseFrame(
+                time: frame.time,
+                joints: frame.joints.mapValues {
+                    JointSample(point: CGPoint(x: $0.point.x + dx, y: $0.point.y), confidence: $0.confidence)
                 }
             )
         }
         let track = PoseTrack(frames: frames, displaySize: CGSize(width: 1080, height: 1920), frameRate: 120, duration: 4)
         let analysis = StrokeAnalyzer().analyze(track: track, handedness: .right)
-        XCTAssertTrue(analysis.warnings.contains { $0.text.contains("склейки") })
+        XCTAssertGreaterThanOrEqual(analysis.signals.cutIndices.count, cutTimes.count)
+        XCTAssertTrue(analysis.warnings.contains { $0.text.contains("скелет пропадает") })
+    }
+
+    func testSingleFrameGlitchIsNotACut() {
+        // Один кадр улетел и вернулся — так дрожит трекинг на мелком игроке.
+        var frames = makeSyntheticTrack().frames
+        let index = Int(2.4 * 120)
+        frames[index] = PoseFrame(
+            time: frames[index].time,
+            joints: frames[index].joints.mapValues {
+                JointSample(point: CGPoint(x: $0.point.x + 900, y: $0.point.y), confidence: $0.confidence)
+            }
+        )
+        let track = PoseTrack(frames: frames, displaySize: CGSize(width: 1080, height: 1920), frameRate: 120, duration: 4)
+        let analysis = StrokeAnalyzer().analyze(track: track, handedness: .right)
+        XCTAssertTrue(analysis.signals.cutIndices.isEmpty, "\(analysis.signals.cutIndices)")
     }
 
     func testThresholdRisesWithNoisyFootage() {

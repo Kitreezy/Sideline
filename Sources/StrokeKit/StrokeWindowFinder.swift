@@ -10,11 +10,14 @@ import Foundation
 public enum StrokeWindowFinder {
     public struct Tuning: Sendable {
         /// Запас вокруг всплеска: замах и проводка должны попасть в окно
-        /// целиком, иначе второй проход не увидит фаз удара.
-        public var padding: TimeInterval = 0.8
+        /// целиком, и входящий мяч тоже — он прилетает до пика, а сопоставить
+        /// его можно только с кистью, которая есть в кадре. На ±0.8 с мяч
+        /// у трёх настоящих ударов оставался за окном.
+        public var padding: TimeInterval = 1.2
         /// Порог здесь заведомо ниже боевого. Пропустить удар нельзя —
         /// его потом уже никак не вернуть, а лишнее окно стоит лишь времени.
-        public var speedFloor: Double = 1.2
+        /// На 15 кадрах в секунду пик сглаживается, поэтому ниже, чем было.
+        public var speedFloor: Double = 1.0
         public var medianFactor: Double = 2.0
         public var minSeparation: TimeInterval = 0.4
 

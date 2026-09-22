@@ -1,8 +1,8 @@
 # Проект генерируется из project.yml, поэтому .xcodeproj в гите нет.
 # После клонирования: make bootstrap
 
-PROJECT := TennisForm.xcodeproj
-SCHEME := TennisForm
+PROJECT := Sideline.xcodeproj
+SCHEME := Sideline
 
 .PHONY: bootstrap generate open test build clean help
 
