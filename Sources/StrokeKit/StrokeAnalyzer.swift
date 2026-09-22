@@ -140,6 +140,8 @@ public struct SessionAnalysis: Sendable {
     public let signals: AnalyzedSignals
     public let strokes: [Stroke]
     public let warnings: [AnalysisWarning]
+    /// Шум измерения на этой записи — по тихим отрезкам, где игрок стоит.
+    public let noise: NoiseFloor
 
     /// Удары, которые в статистику не идут. Начинается с автоматических
     /// сомнений; пользователь может вернуть удар или, наоборот, выкинуть —
@@ -152,7 +154,8 @@ public struct SessionAnalysis: Sendable {
         cameraView: CameraView,
         signals: AnalyzedSignals,
         strokes: [Stroke],
-        warnings: [AnalysisWarning]
+        warnings: [AnalysisWarning],
+        noise: NoiseFloor = .unknown
     ) {
         self.track = track
         self.handedness = handedness
@@ -160,7 +163,25 @@ public struct SessionAnalysis: Sendable {
         self.signals = signals
         self.strokes = strokes
         self.warnings = warnings
+        self.noise = noise
         self.rejectedIDs = Set(strokes.filter(\.isDoubtful).map(\.id))
+    }
+
+    /// Метрика считается, если её видно в этом ракурсе и шум ниже порога
+    /// заметности. Иначе честнее не показывать число вовсе.
+    public func isMeasurable(_ key: MetricKey) -> Bool {
+        key.isReliable(in: cameraView) && noise.isMeasurable(key)
+    }
+
+    /// Почему метрика не считается — ракурс или шум.
+    public func unmeasurableReason(_ key: MetricKey) -> String? {
+        if let reason = key.unreliabilityReason(in: cameraView) { return reason }
+        guard let level = noise.noise(for: key), !noise.isMeasurable(key) else { return nil }
+        let digits = key.fractionDigits
+        return String(
+            format: "Шум измерения ±%.\(digits)f %@ при пороге заметности ±%.\(digits)f: игрок в кадре слишком мелкий, чтобы это мерить.",
+            level, key.unit, key.noticeableSpread
+        )
     }
 
     public var acceptedStrokes: [Stroke] {
@@ -204,19 +225,26 @@ public struct SessionAnalysis: Sendable {
         }
     }
 
-    /// От самой «гуляющей» метрики к стабильной. Метрики, которые в этом
-    /// ракурсе не работают, сюда не попадают вовсе.
+    /// От самой «гуляющей» метрики к стабильной. Метрики, которые здесь
+    /// не измеримы — по ракурсу или по шуму, — сюда не попадают вовсе.
+    /// Нестабильность считается относительно порога с поправкой на шум.
     public func ranked(of type: StrokeType) -> [MetricSummary] {
         summaries(of: type)
-            .filter { $0.key.isReliable(in: cameraView) }
+            .filter { isMeasurable($0.key) }
             .filter { $0.standardDeviation.isFinite && $0.mean.isFinite }
-            .sorted { $0.instability > $1.instability }
+            .sorted { instability(of: $0) > instability(of: $1) }
     }
 
-    /// Метрики, выключенные из-за ракурса — их надо показать отдельно,
-    /// иначе непонятно, куда они делись.
+    /// Разброс относительно порога, поднятого до двух шумов.
+    public func instability(of summary: MetricSummary) -> Double {
+        let threshold = noise.effectiveSpread(for: summary.key)
+        return threshold > 0 ? summary.standardDeviation / threshold : 0
+    }
+
+    /// Метрики, выключенные из-за ракурса или шума — их надо показать
+    /// отдельно, иначе непонятно, куда они делись.
     public var disabledMetrics: [MetricKey] {
-        MetricKey.allCases.filter { !$0.isReliable(in: cameraView) }
+        MetricKey.allCases.filter { !isMeasurable($0) }
     }
 }
 
@@ -339,6 +367,7 @@ public struct StrokeAnalyzer: Sendable {
         }
 
         let cameraView = CameraViewDetector.detect(frames: track.frames)
+        let noise = NoiseEstimator.estimate(signals: signals, frameRate: track.frameRate)
 
         return SessionAnalysis(
             track: track,
@@ -350,8 +379,10 @@ public struct StrokeAnalyzer: Sendable {
                 track: track,
                 signals: signals,
                 strokeCount: strokes.filter { !$0.isDoubtful }.count,
-                cameraView: cameraView
-            )
+                cameraView: cameraView,
+                noise: noise
+            ),
+            noise: noise
         )
     }
 
@@ -486,35 +517,55 @@ public struct StrokeAnalyzer: Sendable {
         var cuts: Set<Int> = []
         guard frames.count > 1, scale > 0 else { return cuts }
 
-        for index in 1..<frames.count {
-            let previous = frames[index - 1]
-            let current = frames[index]
+        // Сравниваем не соседние кадры, а медианы по нескольким кадрам до
+        // и после: настоящая склейка или перескок на другого человека меняют
+        // положение и размер устойчиво, а дрожание трекинга — на один кадр.
+        // На мелком игроке дрожание в 20 px давало сотни ложных разрывов
+        // и дробило разбор на обрывки.
+        let window = 4
+        let necks = frames.map { $0.point(.neck) }
+        let torsos = frames.map { frame -> Double? in
+            guard let neck = frame.point(.neck), let root = frame.point(.root) else { return nil }
+            let length = Geometry.distance(neck, root)
+            return length > 1 ? length : nil
+        }
 
-            let hadSkeleton = previous.joints.count >= 8
-            let hasSkeleton = current.joints.count >= 8
+        func median(_ values: [Double]) -> Double? {
+            guard !values.isEmpty else { return nil }
+            let sorted = values.sorted()
+            return sorted[sorted.count / 2]
+        }
+        func medianPoint(_ range: Range<Int>) -> CGPoint? {
+            let points = range.compactMap { necks[$0] }
+            guard points.count >= 2,
+                  let x = median(points.map { Double($0.x) }),
+                  let y = median(points.map { Double($0.y) }) else { return nil }
+            return CGPoint(x: x, y: y)
+        }
+        func medianTorso(_ range: Range<Int>) -> Double? {
+            let values = range.compactMap { torsos[$0] }
+            return values.count >= 2 ? median(values) : nil
+        }
+
+        for index in 1..<frames.count {
+            let hadSkeleton = frames[index - 1].joints.count >= 8
+            let hasSkeleton = frames[index].joints.count >= 8
             if hadSkeleton != hasSkeleton {
                 cuts.insert(index)
                 continue
             }
 
-            // Прыжок опорных точек.
-            for joint in [BodyJoint.neck, .root] {
-                guard let a = previous.point(joint), let b = current.point(joint) else { continue }
-                if Geometry.distance(a, b) / scale > threshold {
-                    cuts.insert(index)
-                    break
-                }
-            }
-            if cuts.contains(index) { continue }
+            let before = max(0, index - window)..<index
+            let after = index..<min(frames.count, index + window)
+            guard let neckBefore = medianPoint(before), let neckAfter = medianPoint(after) else { continue }
 
-            // Резкая смена масштаба человека — верный признак смены плана.
-            if let neckA = previous.point(.neck), let rootA = previous.point(.root),
-               let neckB = current.point(.neck), let rootB = current.point(.root) {
-                let before = Geometry.distance(neckA, rootA)
-                let after = Geometry.distance(neckB, rootB)
-                if before > 1, after > 1, max(before, after) / min(before, after) > 1.3 {
-                    cuts.insert(index)
-                }
+            if Geometry.distance(neckBefore, neckAfter) / scale > threshold {
+                cuts.insert(index)
+                continue
+            }
+            if let torsoBefore = medianTorso(before), let torsoAfter = medianTorso(after),
+               max(torsoBefore, torsoAfter) / min(torsoBefore, torsoAfter) > 1.3 {
+                cuts.insert(index)
             }
         }
         return cuts
@@ -858,9 +909,17 @@ public struct StrokeAnalyzer: Sendable {
         track: PoseTrack,
         signals: AnalyzedSignals,
         strokeCount: Int,
-        cameraView: CameraView
+        cameraView: CameraView,
+        noise: NoiseFloor = .unknown
     ) -> [AnalysisWarning] {
         var warnings: [AnalysisWarning] = []
+
+        let drowned = MetricKey.allCases.filter { $0.isReliable(in: cameraView) && !noise.isMeasurable($0) }
+        if !drowned.isEmpty {
+            warnings.append(AnalysisWarning(
+                text: "Шум измерения выше порога заметности у метрик: \(drowned.map(\.title).joined(separator: ", ")). На этой записи их не посчитать — игрок в кадре слишком мелкий. Ближе камера — ниже шум."
+            ))
+        }
 
         switch cameraView {
         case .side:

@@ -41,16 +41,17 @@ public enum InsightEngine {
 
         var candidates: [Insight] = []
         let summaries = analysis.summaries(of: type)
-            .filter { $0.key.isReliable(in: analysis.cameraView) }
+            .filter { analysis.isMeasurable($0.key) }
             .filter { $0.mean.isFinite && $0.standardDeviation.isFinite }
             .filter { $0.isWellSampled(of: strokes.count) }
 
         for summary in summaries {
             let guidance = summary.key.guidance(for: type)
-            if let insight = spreadInsight(summary, guidance: guidance) { candidates.append(insight) }
-            if let insight = shortfallInsight(summary, guidance: guidance) { candidates.append(insight) }
+            let noise = analysis.noise
+            if let insight = spreadInsight(summary, guidance: guidance, noise: noise) { candidates.append(insight) }
+            if let insight = shortfallInsight(summary, guidance: guidance, noise: noise) { candidates.append(insight) }
         }
-        if let insight = bestVsWorstInsight(strokes: strokes, type: type, cameraView: analysis.cameraView) {
+        if let insight = bestVsWorstInsight(strokes: strokes, type: type, analysis: analysis) {
             candidates.append(insight)
         }
 
@@ -67,12 +68,14 @@ public enum InsightEngine {
     public static func strength(for analysis: SessionAnalysis, type: StrokeType) -> Insight? {
         let total = analysis.strokes(of: type).count
         guard total >= minStrokes else { return nil }
+        // Стабильность на уровне шума — не достижение, а предел прибора:
+        // хвалить можно только за разброс, который прибор вообще способен увидеть.
         let candidate = analysis.summaries(of: type)
-            .filter { $0.key.isReliable(in: analysis.cameraView) }
+            .filter { analysis.isMeasurable($0.key) }
             .filter { $0.mean.isFinite && $0.standardDeviation.isFinite }
             .filter { $0.isWellSampled(of: total) }
-            .filter { $0.instability < 0.5 }
-            .min { $0.instability < $1.instability }
+            .filter { analysis.instability(of: $0) < 0.5 }
+            .min { analysis.instability(of: $0) < analysis.instability(of: $1) }
         guard let candidate else { return nil }
         return Insight(
             kind: .strength,
@@ -86,20 +89,24 @@ public enum InsightEngine {
 
     // MARK: - Виды выводов
 
-    static func spreadInsight(_ summary: MetricSummary, guidance: MetricGuidance) -> Insight? {
-        guard summary.instability > 1 else { return nil }
+    static func spreadInsight(_ summary: MetricSummary, guidance: MetricGuidance, noise: NoiseFloor) -> Insight? {
         let key = summary.key
+        let threshold = noise.effectiveSpread(for: key)
+        guard threshold > 0 else { return nil }
+        let score = summary.standardDeviation / threshold
+        guard score > 1 else { return nil }
+        let noiseNote = noise.noise(for: key).map { " Шум измерения здесь ±\(format($0, key))." } ?? ""
         return Insight(
             kind: .spread,
             key: key,
             title: "\(key.title) — большой разброс",
-            detail: "±\(format(summary.standardDeviation, key)) \(key.unit) от удара к удару, заметным считается уже ±\(format(key.noticeableSpread, key)). \(guidance.spreadConsequence)",
+            detail: "±\(format(summary.standardDeviation, key)) \(key.unit) от удара к удару, заметным считается уже ±\(format(threshold, key)).\(noiseNote) \(guidance.spreadConsequence)",
             cue: guidance.cue,
-            score: summary.instability
+            score: score
         )
     }
 
-    static func shortfallInsight(_ summary: MetricSummary, guidance: MetricGuidance) -> Insight? {
+    static func shortfallInsight(_ summary: MetricSummary, guidance: MetricGuidance, noise: NoiseFloor) -> Insight? {
         guard let band = guidance.band, summary.key.noticeableSpread > 0 else { return nil }
         let key = summary.key
         let mean = summary.mean
@@ -121,7 +128,8 @@ public enum InsightEngine {
             return nil
         }
 
-        let score = gap / key.noticeableSpread
+        // Отклонение от ориентира меньше двух шумов — не отклонение.
+        let score = gap / noise.effectiveSpread(for: key)
         guard score > 0.75 else { return nil }
 
         var detail = "В среднем \(format(mean, key)) \(key.unit), ориентир \(format(band.lowerBound, key))–\(format(band.upperBound, key))."
@@ -142,7 +150,7 @@ public enum InsightEngine {
     static func bestVsWorstInsight(
         strokes: [Stroke],
         type: StrokeType,
-        cameraView: CameraView
+        analysis: SessionAnalysis
     ) -> Insight? {
         guard strokes.count >= minStrokesForComparison else { return nil }
         let ordered = strokes
@@ -160,9 +168,11 @@ public enum InsightEngine {
         }
 
         var top: (key: MetricKey, best: Double, worst: Double, score: Double)?
-        for key in MetricKey.allCases where key != .peakWristSpeed && key.isReliable(in: cameraView) {
-            guard let a = mean(best, key), let b = mean(worst, key), key.noticeableSpread > 0 else { continue }
-            let score = abs(a - b) / key.noticeableSpread
+        for key in MetricKey.allCases where key != .peakWristSpeed && analysis.isMeasurable(key) {
+            guard let a = mean(best, key), let b = mean(worst, key) else { continue }
+            let threshold = analysis.noise.effectiveSpread(for: key)
+            guard threshold > 0 else { continue }
+            let score = abs(a - b) / threshold
             if score > (top?.score ?? 0) { top = (key, a, b, score) }
         }
 
