@@ -189,7 +189,6 @@ public enum InsightEngine {
     }
 
     private static func format(_ value: Double, _ key: MetricKey) -> String {
-        guard value.isFinite else { return "—" }
-        return String(format: "%.\(key.fractionDigits)f", value)
+        key.format(value)
     }
 }

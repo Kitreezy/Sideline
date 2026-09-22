@@ -82,6 +82,20 @@ public enum MetricKey: String, CaseIterable, Sendable, Codable {
         default: return 0
         }
     }
+
+    /// Значение с нужным числом знаков. NaN — обычное дело: длительность
+    /// замаха считается не у каждого удара.
+    public func format(_ value: Double) -> String {
+        guard value.isFinite else { return "—" }
+        return String(format: "%.\(fractionDigits)f", value)
+    }
+
+    /// То же с единицей. Градус пишется вплотную к числу — «126 °»
+    /// читается как опечатка.
+    public func formatWithUnit(_ value: Double) -> String {
+        guard value.isFinite else { return "—" }
+        return unit == "°" ? "\(format(value))\(unit)" : "\(format(value)) \(unit)"
+    }
 }
 
 /// Сводка по одной метрике на всей серии ударов.
