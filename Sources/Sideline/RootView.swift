@@ -91,6 +91,13 @@ struct ImportScreen: View {
 
             if !store.savedSessions.isEmpty {
                 Section {
+                    if store.savedSessions.count >= 2 {
+                        NavigationLink {
+                            ProgressScreen(store: store)
+                        } label: {
+                            Label("Что меняется от тренировки к тренировке", systemImage: "chart.line.uptrend.xyaxis")
+                        }
+                    }
                     ForEach(store.savedSessions) { session in
                         Button { store.open(session) } label: {
                             SessionRow(session: session)

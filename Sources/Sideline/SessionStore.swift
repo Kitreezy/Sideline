@@ -16,6 +16,10 @@ struct SavedSession: Codable, Identifiable, Equatable {
     let typeCounts: [String: Int]
     let videoFileName: String
     var videoBytes: Int64
+    /// Средние, разбросы и шум — всё, что нужно ряду прогресса. Лежит здесь,
+    /// чтобы построить график по десятку тренировок, не читая ни одной
+    /// дорожки скелета: каждая из них разбирается секунды.
+    var digest: SessionDigest?
 }
 
 /// Разбор, который начали, но не закончили: приложение убили в фоне
@@ -38,7 +42,7 @@ enum SessionStoreError: LocalizedError {
 
 @MainActor
 final class SessionStore {
-    private let root: URL
+    private nonisolated let root: URL
     private let fileManager = FileManager.default
 
     init(root: URL? = nil) {
@@ -49,9 +53,9 @@ final class SessionStore {
         try? fileManager.createDirectory(at: pendingDirectory, withIntermediateDirectories: true)
     }
 
-    private var sessionsDirectory: URL { root.appending(path: "Sessions", directoryHint: .isDirectory) }
+    private nonisolated var sessionsDirectory: URL { root.appending(path: "Sessions", directoryHint: .isDirectory) }
     private var pendingDirectory: URL { root.appending(path: "Pending", directoryHint: .isDirectory) }
-    private func directory(for id: UUID) -> URL {
+    private nonisolated func directory(for id: UUID) -> URL {
         sessionsDirectory.appending(path: id.uuidString, directoryHint: .isDirectory)
     }
 
@@ -72,6 +76,12 @@ final class SessionStore {
 
     func totalBytes() -> Int64 {
         list().reduce(0) { $0 + $1.videoBytes }
+    }
+
+    /// Тренировки без сводки или со сводкой от прежней версии анализатора.
+    /// Их надо пересчитать, иначе на одном графике окажутся два прибора.
+    func needingDigest() -> [SavedSession] {
+        list().filter { $0.digest?.isCurrent != true }
     }
 
     // MARK: - Сохранение и загрузка
@@ -111,13 +121,20 @@ final class SessionStore {
             strokeCount: analysis.acceptedStrokes.count,
             typeCounts: typeCounts,
             videoFileName: videoName,
-            videoBytes: fileSize(videoDestination)
+            videoBytes: fileSize(videoDestination),
+            digest: SessionDigest(analysis)
         )
         try JSONEncoder().encode(session).write(to: dir.appending(path: "meta.json"), options: .atomic)
         return (session, videoDestination)
     }
 
-    func load(_ session: SavedSession) throws -> (track: PoseTrack, ballTrajectories: [BallTrajectory]?, videoURL: URL) {
+    /// Читает дорожку и разбирает её заново. Дорогая часть — чтение:
+    /// на длинной записи это секунды, поэтому вызывать только с фонового
+    /// потока. Vision при этом не запускается, и старые тренировки
+    /// получают все улучшения анализатора.
+    nonisolated func analysis(
+        of session: SavedSession
+    ) throws -> (analysis: SessionAnalysis, videoURL: URL) {
         let dir = directory(for: session.id)
         guard let data = try? Data(contentsOf: dir.appending(path: "track.plist")) else {
             throw SessionStoreError.missingTrack
@@ -126,22 +143,29 @@ final class SessionStore {
         // Старые сессии без мяча открываются как раньше — без него.
         let ball = (try? Data(contentsOf: dir.appending(path: "ball.plist")))
             .flatMap { try? PropertyListDecoder().decode([BallTrajectory].self, from: $0) }
-        return (track, ball, dir.appending(path: session.videoFileName))
+        let analysis = StrokeAnalyzer().analyze(
+            track: track, handedness: session.handedness, ballTrajectories: ball
+        )
+        return (analysis, dir.appending(path: session.videoFileName))
     }
 
-    /// Обновляет число ударов в списке после того, как пользователь
-    /// повыкидывал не-удары — иначе список врёт.
-    func refreshCounts(for session: SavedSession, from analysis: SessionAnalysis) {
+    /// Обновляет сводку тренировки: число ударов в списке — после того,
+    /// как пользователь повыкидывал не-удары, — и средние с разбросами,
+    /// из которых потом строится прогресс.
+    @discardableResult
+    func refresh(_ session: SavedSession, from analysis: SessionAnalysis) -> SavedSession {
         var typeCounts: [String: Int] = [:]
         for stroke in analysis.acceptedStrokes { typeCounts[stroke.type.rawValue, default: 0] += 1 }
         let updated = SavedSession(
             id: session.id, createdAt: session.createdAt, handedness: session.handedness,
             duration: session.duration, cameraView: session.cameraView,
             strokeCount: analysis.acceptedStrokes.count, typeCounts: typeCounts,
-            videoFileName: session.videoFileName, videoBytes: session.videoBytes
+            videoFileName: session.videoFileName, videoBytes: session.videoBytes,
+            digest: SessionDigest(analysis)
         )
         try? JSONEncoder().encode(updated)
             .write(to: directory(for: session.id).appending(path: "meta.json"), options: .atomic)
+        return updated
     }
 
     func delete(_ session: SavedSession) {

@@ -218,17 +218,74 @@ final class AnalysisStore {
     func open(_ session: SavedSession) {
         currentJob?.cancel()
         state = .working(Work(stage: .computing, fraction: 1, remaining: nil))
-        do {
-            let loaded = try sessions.load(session)
-            var analysis = StrokeAnalyzer().analyze(
-                track: loaded.track, handedness: session.handedness, ballTrajectories: loaded.ballTrajectories
-            )
-            overrides.apply(to: &analysis)
-            handedness = session.handedness
-            currentSession = session
-            state = .ready(analysis, videoURL: loaded.videoURL)
-        } catch {
-            state = .failed(error.localizedDescription)
+        currentJob = Task {
+            do {
+                // Само чтение дорожки на длинной записи занимает секунды,
+                // и на главном потоке это выглядело как зависший список.
+                let loaded = try await Task.detached(priority: .userInitiated) { [sessions] in
+                    try sessions.analysis(of: session)
+                }.value
+                try Task.checkCancellation()
+
+                var analysis = loaded.analysis
+                self.overrides.apply(to: &analysis)
+                self.handedness = session.handedness
+                // Сводка переписывается при каждом открытии: и решения
+                // пользователя, и правила счёта могли с тех пор поменяться.
+                self.currentSession = self.sessions.refresh(session, from: analysis)
+                self.reloadSessions()
+                self.state = .ready(analysis, videoURL: loaded.videoURL)
+            } catch is CancellationError {
+                // Ушёл на другой экран — молча выходим.
+            } catch {
+                self.state = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    // MARK: - Прогресс между тренировками
+
+    /// Тренировки, готовые встать в ряд прогресса.
+    var progressSessions: [ProgressSession] {
+        savedSessions.compactMap { session in
+            guard let digest = session.digest, digest.isCurrent else { return nil }
+            return ProgressSession(id: session.id, date: session.createdAt, digest: digest)
+        }
+    }
+
+    /// Сколько тренировок ещё пересчитывается — для строки на экране прогресса.
+    private(set) var digestRebuild: (done: Int, total: Int)?
+    private var digestJob: Task<Void, Never>?
+
+    /// Досчитывает сводки у тренировок, записанных до появления прогресса
+    /// или разобранных прежней версией анализатора. Чтение дорожек долгое,
+    /// поэтому идёт в фоне и по одной.
+    func rebuildDigests() {
+        guard digestJob == nil else { return }
+        let stale = sessions.needingDigest()
+        guard !stale.isEmpty else { return }
+
+        digestRebuild = (done: 0, total: stale.count)
+        digestJob = Task {
+            defer {
+                self.digestJob = nil
+                self.digestRebuild = nil
+                self.reloadSessions()
+            }
+            for (index, session) in stale.enumerated() {
+                guard !Task.isCancelled else { return }
+                let loaded = try? await Task.detached(priority: .utility) { [sessions] in
+                    try sessions.analysis(of: session)
+                }.value
+                if var analysis = loaded?.analysis {
+                    self.overrides.apply(to: &analysis)
+                    self.sessions.refresh(session, from: analysis)
+                    // Список перечитывается сразу: ряд на экране наполняется
+                    // по мере счёта, а не появляется целиком в конце.
+                    self.reloadSessions()
+                }
+                self.digestRebuild = (done: index + 1, total: stale.count)
+            }
         }
     }
 
@@ -236,7 +293,9 @@ final class AnalysisStore {
     /// Симулятор без Vision: синтетическая тренировка, чтобы смотреть интерфейс.
     func createDemoSession() {
         do {
-            let session = try DemoSession.make(in: sessions)
+            // Номер по кругу: четыре нажатия дают четыре разные «тренировки»,
+            // и на экране прогресса появляется ряд, а не повтор одного и того же.
+            let session = try DemoSession.make(in: sessions, variant: savedSessions.count % 4)
             reloadSessions()
             open(session)
         } catch {
@@ -262,7 +321,7 @@ final class AnalysisStore {
         overrides.remember(rejected: rejected, for: stroke, in: analysis)
         state = .ready(analysis, videoURL: url)
         if let currentSession {
-            sessions.refreshCounts(for: currentSession, from: analysis)
+            self.currentSession = sessions.refresh(currentSession, from: analysis)
             reloadSessions()
         }
     }

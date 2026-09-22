@@ -8,15 +8,35 @@ import StrokeKit
 /// Только для отладочных сборок.
 @MainActor
 enum DemoSession {
-    static func make(in store: SessionStore) throws -> SavedSession {
+    /// `variant` — номер демо-тренировки подряд. С каждой следующей разброс
+    /// сужается: иначе на экране прогресса нечего сравнивать, а посмотреть
+    /// на него в симуляторе надо.
+    static func make(in store: SessionStore, variant: Int = 0) throws -> SavedSession {
         let fps = 60.0
-        let duration = 40.0
-        // Удары разной силы и с разным локтем, три из них «слабые» —
-        // чтобы были и выводы, и сомнения.
-        let contacts: [(time: Double, amplitude: Double, elbowDrop: Double)] = [
-            (3, 300, 0), (7, 320, 40), (11, 280, 0), (15, 60, 0), (19, 310, 60),
-            (23, 290, 0), (27, 300, 20), (31, 50, 0), (35, 330, 0),
-        ]
+        let duration = 42.0
+
+        // Воспроизводимая псевдослучайность: одна и та же тренировка
+        // при том же номере, иначе график скачет от запуска к запуску.
+        var seed = UInt64(truncatingIfNeeded: variant &+ 1) &* 2_654_435_761
+        func jitter() -> Double {
+            seed ^= seed << 13
+            seed ^= seed >> 7
+            seed ^= seed << 17
+            return Double(seed % 2000) / 1000 - 1
+        }
+
+        let width = max(0.25, 1 - Double(variant) * 0.3)
+        var contacts: [(time: Double, amplitude: Double, elbowDrop: Double)] = []
+        for i in 0..<14 {
+            contacts.append((
+                time: 3 + Double(i) * 2.6,
+                amplitude: 300 + 60 * width * jitter(),
+                elbowDrop: max(0, 45 + 45 * width * jitter())
+            ))
+        }
+        // Два заведомо слабых взмаха — чтобы был и раздел «на проверку».
+        contacts[3].amplitude = 60
+        contacts[9].amplitude = 50
         var frames: [PoseFrame] = []
         for i in 0..<Int(duration * fps) {
             let t = Double(i) / fps
