@@ -225,7 +225,7 @@ public enum BallContactMatcher {
     }
 
     /// Положение кисти в момент времени — по ближайшему кадру.
-    static func wristPosition(signals: AnalyzedSignals, at time: TimeInterval) -> CGPoint? {
+    public static func wristPosition(signals: AnalyzedSignals, at time: TimeInterval) -> CGPoint? {
         let times = signals.times
         guard !times.isEmpty else { return nil }
         var lo = 0, hi = times.count - 1

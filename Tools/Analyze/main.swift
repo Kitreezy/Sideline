@@ -122,6 +122,59 @@ struct Runner {
             }
         }
 
+        // --export <папка>: сессия в формате приложения, чтобы подложить
+        // её в контейнер симулятора и смотреть интерфейс на живых данных.
+        if let flag = args.firstIndex(of: "--export"), args.count > flag + 1 {
+            let dir = URL(fileURLWithPath: args[flag + 1])
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            try encoder.encode(track).write(to: dir.appending(path: "track.plist"))
+            try encoder.encode(trajectories).write(to: dir.appending(path: "ball.plist"))
+            var typeCounts: [String: Int] = [:]
+            for stroke in analysis.acceptedStrokes { typeCounts[stroke.type.rawValue, default: 0] += 1 }
+            let videoName = "video.\(url.pathExtension.lowercased())"
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+            let meta: [String: Any] = [
+                "id": UUID().uuidString,
+                "createdAt": Date().timeIntervalSinceReferenceDate,
+                "handedness": hand.rawValue,
+                "duration": track.duration,
+                "cameraView": analysis.cameraView.rawValue,
+                "strokeCount": analysis.acceptedStrokes.count,
+                "typeCounts": typeCounts,
+                "videoFileName": videoName,
+                "videoBytes": bytes,
+            ]
+            try JSONSerialization.data(withJSONObject: meta).write(to: dir.appending(path: "meta.json"))
+            print("\nэкспорт: \(dir.path) (видео скопируй как \(videoName))")
+        }
+
+        // --noise <from> <to>: разброс метрик на отрезке, где игрок стоит.
+        // Это шум измерения — то, что нельзя приписывать технике.
+        if let flag = args.firstIndex(of: "--noise"), args.count > flag + 2,
+           let from = Double(args[flag + 1]), let to = Double(args[flag + 2]) {
+            let sig = analysis.signals
+            let indices = sig.times.indices.filter { sig.times[$0] >= from && sig.times[$0] <= to }
+            func sd(_ values: [Double]) -> Double {
+                let finite = values.filter { $0.isFinite }
+                guard finite.count > 2 else { return .nan }
+                let mean = finite.reduce(0, +) / Double(finite.count)
+                return (finite.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(finite.count - 1)).squareRoot()
+            }
+            let scale = indices.map { sig.scale(at: $0) }.reduce(0, +) / Double(max(1, indices.count))
+            print("\n=== ШУМ на \(from)–\(to) с (игрок стоит), кадров \(indices.count), корпус \(String(format: "%.0f", scale)) px ===")
+            print(String(format: "угол локтя:        ±%.1f°", sd(indices.map { sig.elbowAngle.values[$0] })))
+            print(String(format: "угол колена:       ±%.1f°", sd(indices.map { sig.kneeAngle.values[$0] })))
+            print(String(format: "наклон плеч:       ±%.1f°", sd(indices.map { sig.shoulderAngle.values[$0] })))
+            print(String(format: "кисть по X:        ±%.2f корп", sd(indices.map { sig.wristX.values[$0] }) / scale))
+            print(String(format: "кисть по Y:        ±%.2f корп", sd(indices.map { sig.wristY.values[$0] }) / scale))
+            print(String(format: "скорость кисти:    медиана %.2f корп/с", {
+                let v = indices.map { sig.wristSpeed.values[$0] }.filter { $0.isFinite }.sorted()
+                return v.isEmpty ? Double.nan : v[v.count / 2]
+            }()))
+        }
+
         // Гистограмма скорости кисти по всему видео — видно, есть ли вообще всплески.
         let speeds = analysis.signals.wristSpeed.values.filter { $0.isFinite }
         if !speeds.isEmpty {

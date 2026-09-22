@@ -2,12 +2,21 @@ import StrokeKit
 import SwiftUI
 
 struct ResultsScreen: View {
-    let analysis: SessionAnalysis
-    let videoURL: URL
-    let onSetRejected: (Stroke, Bool) -> Void
-    let onReset: () -> Void
+    let store: AnalysisStore
 
     var body: some View {
+        if let analysis = store.analysis, let videoURL = store.videoURL {
+            content(analysis: analysis, videoURL: videoURL)
+        } else {
+            ContentUnavailableView("Разбора нет", systemImage: "tray")
+        }
+    }
+
+    private func onSetRejected(_ stroke: Stroke, _ rejected: Bool) {
+        store.setRejected(rejected, for: stroke)
+    }
+
+    private func content(analysis: SessionAnalysis, videoURL: URL) -> some View {
         List {
             Section {
                 LabeledContent("Ракурс", value: analysis.cameraView.title)
@@ -42,7 +51,7 @@ struct ResultsScreen: View {
                 }
             } else {
                 ForEach(analysis.presentTypes, id: \.self) { type in
-                    typeSection(type)
+                    typeSection(type, analysis: analysis)
                 }
 
                 if !analysis.disabledMetrics.isEmpty {
@@ -65,12 +74,10 @@ struct ResultsScreen: View {
                 Section {
                     ForEach(analysis.acceptedStrokes) { stroke in
                         NavigationLink {
-                            StrokeDetailScreen(
-                                analysis: analysis, stroke: stroke, videoURL: videoURL,
-                                onSetRejected: onSetRejected
-                            )
+                            StrokeDetailScreen(store: store, strokeID: stroke.id)
                         } label: {
-                            StrokeRow(stroke: stroke, videoURL: videoURL)
+                            StrokeRow(stroke: stroke, videoURL: videoURL,
+                                      crop: PlayerRegion.rect(for: stroke, in: analysis))
                         }
                         .swipeActions(edge: .trailing) {
                             Button("Не удар", role: .destructive) { onSetRejected(stroke, true) }
@@ -93,12 +100,10 @@ struct ResultsScreen: View {
                 Section {
                     ForEach(analysis.rejectedStrokes) { stroke in
                         NavigationLink {
-                            StrokeDetailScreen(
-                                analysis: analysis, stroke: stroke, videoURL: videoURL,
-                                onSetRejected: onSetRejected
-                            )
+                            StrokeDetailScreen(store: store, strokeID: stroke.id)
                         } label: {
-                            RejectedRow(stroke: stroke, videoURL: videoURL)
+                            RejectedRow(stroke: stroke, videoURL: videoURL,
+                                        crop: PlayerRegion.rect(for: stroke, in: analysis))
                         }
                         .swipeActions(edge: .leading) {
                             Button("Это удар") { onSetRejected(stroke, false) }
@@ -116,15 +121,12 @@ struct ResultsScreen: View {
                 }
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Новое видео", action: onReset)
-            }
-        }
+        .navigationTitle("Разбор")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     @ViewBuilder
-    private func typeSection(_ type: StrokeType) -> some View {
+    private func typeSection(_ type: StrokeType, analysis: SessionAnalysis) -> some View {
         let strokes = analysis.strokes(of: type)
         let insights = InsightEngine.insights(for: analysis, type: type)
         let strength = InsightEngine.strength(for: analysis, type: type)
@@ -159,7 +161,7 @@ struct ResultsScreen: View {
         if strokes.count >= 2 {
             Section("\(type.title) — все метрики по разбросу") {
                 ForEach(analysis.ranked(of: type)) { summary in
-                    InstabilityRow(summary: summary, type: type)
+                    InstabilityRow(summary: summary, type: type, total: strokes.count)
                 }
             }
         }
@@ -180,12 +182,14 @@ private struct InsightRow: View {
             Text(insight.detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             if let cue = insight.cue {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "figure.tennis")
                         .font(.caption)
                     Text(cue)
                         .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .foregroundStyle(.primary)
                 .padding(8)
@@ -212,11 +216,17 @@ private struct InsightRow: View {
 private struct InstabilityRow: View {
     let summary: MetricSummary
     let type: StrokeType
+    var total: Int = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(summary.key.title).font(.subheadline.weight(.medium))
+                if total > 0, summary.finiteCount < total {
+                    Text("\(summary.finiteCount) из \(total)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer()
                 Text("±\(Format.value(summary.standardDeviation, key: summary.key)) \(summary.key.unit)")
                     .font(.caption.monospacedDigit())
@@ -253,10 +263,11 @@ private struct InstabilityRow: View {
 private struct RejectedRow: View {
     let stroke: Stroke
     let videoURL: URL
+    let crop: CGRect?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            ContactThumbnail(videoURL: videoURL, time: stroke.contactTime)
+            ContactThumbnail(videoURL: videoURL, time: stroke.contactTime, crop: crop)
                 .opacity(0.6)
             VStack(alignment: .leading, spacing: 2) {
                 Text(Format.time(stroke.contactTime)).font(.subheadline)
@@ -273,10 +284,11 @@ private struct RejectedRow: View {
 private struct StrokeRow: View {
     let stroke: Stroke
     let videoURL: URL
+    let crop: CGRect?
 
     var body: some View {
         HStack(spacing: 10) {
-            ContactThumbnail(videoURL: videoURL, time: stroke.contactTime)
+            ContactThumbnail(videoURL: videoURL, time: stroke.contactTime, crop: crop)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(stroke.type.title)

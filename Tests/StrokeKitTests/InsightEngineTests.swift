@@ -137,6 +137,21 @@ final class InsightEngineTests: XCTestCase {
         XCTAssertEqual(strength?.kind, .strength)
     }
 
+    func testSingleMeasurementIsNotAStrength() {
+        // Регрессия с живой записи: замах измерился у одного удара из пяти,
+        // разброс одного значения — ноль, и это выдавалось за стабильность.
+        let rows = (0..<8).map { i -> [MetricKey: Double] in
+            var row = decentStroke()
+            row[.backswingDuration] = i == 0 ? 0.33 : .nan
+            row[.contactHeight] = 0.7 + Double(i % 3) * 0.2   // а тут пусть гуляет
+            return row
+        }
+        let strength = InsightEngine.strength(for: session(rows), type: .forehand)
+        XCTAssertNotEqual(strength?.key, .backswingDuration, "одно значение — не стабильность")
+        let insights = InsightEngine.insights(for: session(rows), type: .forehand)
+        XCTAssertFalse(insights.contains { $0.key == .backswingDuration })
+    }
+
     func testRejectedStrokesDoNotInfluenceInsights() {
         var analysis = session((0..<8).map { _ in decentStroke() } + [{
             var bad = decentStroke()
