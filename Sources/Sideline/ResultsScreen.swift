@@ -59,15 +59,15 @@ struct ResultsScreen: View {
                         ForEach(analysis.disabledMetrics, id: \.self) { key in
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(key.title).font(.subheadline)
-                                if let reason = key.unreliabilityReason(in: analysis.cameraView) {
+                                if let reason = analysis.unmeasurableReason(key) {
                                     Text(reason).font(.caption).foregroundStyle(.secondary)
                                 }
                             }
                         }
                     } header: {
-                        Text("Не считалось в этом ракурсе")
+                        Text("Не считалось на этой записи")
                     } footer: {
-                        Text("Эти метрики требуют съёмки сбоку. Показать их сейчас значило бы показать число, которое меряет не то, что написано.")
+                        Text("Ракурс или шум измерения не дают посчитать эти метрики честно. Показать их значило бы показать число, которое меряет не то, что написано.")
                     }
                 }
 
@@ -161,7 +161,11 @@ struct ResultsScreen: View {
         if strokes.count >= 2 {
             Section("\(type.title) — все метрики по разбросу") {
                 ForEach(analysis.ranked(of: type)) { summary in
-                    InstabilityRow(summary: summary, type: type, total: strokes.count)
+                    InstabilityRow(
+                        summary: summary, type: type, total: strokes.count,
+                        instability: analysis.instability(of: summary),
+                        noise: analysis.noise.noise(for: summary.key)
+                    )
                 }
             }
         }
@@ -217,6 +221,8 @@ private struct InstabilityRow: View {
     let summary: MetricSummary
     let type: StrokeType
     var total: Int = 0
+    var instability: Double = 0
+    var noise: Double? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -234,11 +240,11 @@ private struct InstabilityRow: View {
             }
 
             GeometryReader { geometry in
-                let fill = min(1, max(0.02, summary.instability / 3))
+                let fill = min(1, max(0.02, instability / 3))
                 ZStack(alignment: .leading) {
                     Capsule().fill(.quaternary)
                     Capsule()
-                        .fill(summary.instability > 1 ? Color.orange : Color.green)
+                        .fill(instability > 1 ? Color.orange : Color.green)
                         .frame(width: geometry.size.width * fill)
                 }
             }
@@ -251,6 +257,9 @@ private struct InstabilityRow: View {
                 }
                 if let band = summary.key.guidance(for: type).band {
                     Text("· ориентир \(Format.value(band.lowerBound, key: summary.key))–\(Format.value(band.upperBound, key: summary.key))")
+                }
+                if let noise {
+                    Text("· шум ±\(Format.value(noise, key: summary.key))")
                 }
             }
             .font(.caption2)

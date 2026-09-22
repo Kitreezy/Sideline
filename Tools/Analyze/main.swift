@@ -80,6 +80,17 @@ struct Runner {
             }
         }
 
+        print("\n=== ШУМ ИЗМЕРЕНИЯ (тишины \(String(format: "%.1f", analysis.noise.quietSeconds)) с) ===")
+        for run in NoiseEstimator.quietRuns(signals: analysis.signals) {
+            let t0 = analysis.signals.times[run.lowerBound], t1 = analysis.signals.times[run.upperBound - 1]
+            print(String(format: "  тихий отрезок %6.2f–%6.2f с (%.1f с)", t0, t1, t1 - t0))
+        }
+        for key in MetricKey.allCases {
+            guard let level = analysis.noise.noise(for: key) else { continue }
+            let verdict = analysis.noise.isMeasurable(key) ? "" : "  <-- не измеримо"
+            print("  \(key.title): ±\(String(format: "%.\(key.fractionDigits)f", level)) \(key.unit), порог ±\(String(format: "%.\(key.fractionDigits)f", key.noticeableSpread))\(verdict)")
+        }
+
         print("\n=== РАКУРС ===")
         print(analysis.cameraView.title)
         let disabled = analysis.disabledMetrics
